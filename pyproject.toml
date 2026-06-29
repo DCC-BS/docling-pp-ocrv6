@@ -161,6 +161,4 @@ exclude_lines = [
     "@(abc\\.)?abstractmethod",
 ]
 
-[tool.uv]
-exclude-newer = "1 week"
-exclude-newer-package = { dcc-backend-common = "P1D" }
+
