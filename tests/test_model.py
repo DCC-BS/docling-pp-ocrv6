@@ -191,7 +191,7 @@ def test_missing_rapidocr_raises(monkeypatch, stub_models):
 def test_download_models_calls_hf(monkeypatch, tmp_path):
     calls = []
 
-    def fake_download(repo, filename, local_dir, force_download=False):
+    def fake_download(repo, filename, local_dir, *, force_download=False):
         calls.append((repo, filename))
         return str(local_dir)
 
