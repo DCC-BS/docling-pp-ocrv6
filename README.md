@@ -1,13 +1,28 @@
 # docling-pp-ocrv6
 
-A [Docling](https://github.com/docling-project/docling) OCR plugin for
-PaddlePaddle's **PP-OCRv6** models. It runs the PP-OCRv6 detection and
-recognition **ONNX** checkpoints locally through
-[RapidOCR](https://github.com/RapidAI/RapidOCR) (onnxruntime), so OCR happens
-inside the docling worker — no external service required.
+A [Docling](https://github.com/docling-project/docling) OCR plugin for PaddlePaddle's **PP-OCRv6** models.
 
-GPU acceleration is automatic when the docling accelerator device resolves to
-CUDA and `onnxruntime-gpu` is installed.
+This plugin seamlessly integrates with Docling's standard pipeline to provide local OCR capabilities using PaddlePaddle's **PP-OCRv6** models. It runs the PP-OCRv6 detection and recognition **ONNX** checkpoints locally through [RapidOCR](https://github.com/RapidAI/RapidOCR) (onnxruntime), so OCR happens inside the docling worker — no external service required.
+
+---
+
+<p align="center">
+  <a href="https://github.com/DCC-BS/docling-pp-ocrv6">GitHub</a>
+  &nbsp;|&nbsp;
+  <a href="https://pypi.org/project/docling-pp-ocrv6/">PyPI</a>
+</p>
+
+---
+
+[![PyPI version](https://img.shields.io/pypi/v/docling-pp-ocrv6.svg)](https://pypi.org/project/docling-pp-ocrv6/)
+[![Python versions](https://img.shields.io/pypi/pyversions/docling-pp-ocrv6.svg)](https://pypi.org/project/docling-pp-ocrv6/)
+[![License](https://img.shields.io/github/license/DCC-BS/docling-pp-ocrv6)](https://github.com/DCC-BS/docling-pp-ocrv6/blob/main/LICENSE)
+[![CI](https://github.com/DCC-BS/docling-pp-ocrv6/actions/workflows/main.yml/badge.svg)](https://github.com/DCC-BS/docling-pp-ocrv6/actions/workflows/main.yml)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Coverage](https://codecov.io/gh/DCC-BS/docling-pp-ocrv6/graph/badge.svg)](https://codecov.io/gh/DCC-BS/docling-pp-ocrv6)
+
+
+GPU acceleration is automatic when the docling accelerator device resolves to CUDA and `onnxruntime-gpu` is installed.
 
 ## Installation
 
