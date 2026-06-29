@@ -215,15 +215,14 @@ class PPOCRv6Model(BaseOcrModel):
             with TimeRecorder(conv_res, "ocr"):
                 ocr_rects = self.get_ocr_rects(page)
                 all_ocr_cells: list[TextCell] = []
-                cell_idx = 0  # running index across all rects on the page
+                cell_idx = 0
 
                 for ocr_rect in ocr_rects:
                     if ocr_rect.area() == 0:
                         continue
                     high_res_image = page._backend.get_page_image(scale=self.scale, cropbox=ocr_rect)  # noqa: SLF001
                     im = np.array(high_res_image)
-                    # RapidOCR returns a union of stage-specific outputs; with
-                    # det+rec enabled it carries boxes/txts/scores. Treat as Any.
+                    # cast: RapidOCR's return type is a union of stage-specific outputs
                     result = cast(
                         "Any",
                         self.reader(
@@ -233,8 +232,7 @@ class PPOCRv6Model(BaseOcrModel):
                             use_rec=self.options.use_rec,
                         ),
                     )
-                    # Stage-specific outputs may lack boxes/txts/scores when a
-                    # stage is disabled; skip the rect rather than crash.
+                    # a disabled stage means the matching attribute is absent
                     boxes = getattr(result, "boxes", None) if result is not None else None
                     txts = getattr(result, "txts", None)
                     scores = getattr(result, "scores", None)
