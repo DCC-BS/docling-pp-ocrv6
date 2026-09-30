@@ -66,6 +66,22 @@ class PPOCRv6Options(OcrOptions):
         cls_model_path: Explicit local path to an angle-classification ONNX
             file. When unset, RapidOCR's bundled cls model is used. Falls back
             to ``PPOCRV6_CLS_MODEL_PATH``.
+        whole_page: Read every page as one picture instead of cropping it into
+            the boxes the layout model found. A layout box is drawn around what
+            a region means, not around what OCR needs, and a line of text cut
+            by one is read only as far as the cut ("Gesundheitsdepartement"
+            becomes "Gesundheitso"). Unlike docling's ``force_full_page_ocr``
+            this only widens what is read: the text layer's own words are
+            kept, not thrown away. Costs a full page of OCR on pages that
+            would otherwise be read in parts. Falls back to
+            ``PPOCRV6_WHOLE_PAGE``.
+        return_word_box: Ask the recogniser where each word of a line stands,
+            and put those words in the page's ``word_cells``. The lines it
+            reads are unchanged; the words come in addition, so a caller that
+            wants to know where a single name on a scanned page stands no
+            longer has to take the whole line. Off by default: it costs the
+            word-box computation and nothing that reads lines needs it. Falls
+            back to ``PPOCRV6_RETURN_WORD_BOX``.
         rapidocr_params: Extra RapidOCR ``params`` overrides merged on top of
             the engine defaults.
     """
@@ -85,6 +101,9 @@ class PPOCRv6Options(OcrOptions):
     rec_model_path: str | None = Field(default_factory=lambda: os.environ.get("PPOCRV6_REC_MODEL_PATH") or None)
     rec_keys_path: str | None = Field(default_factory=lambda: os.environ.get("PPOCRV6_REC_KEYS_PATH") or None)
     cls_model_path: str | None = Field(default_factory=lambda: os.environ.get("PPOCRV6_CLS_MODEL_PATH") or None)
+
+    whole_page: bool = Field(default_factory=lambda: _env_bool("PPOCRV6_WHOLE_PAGE", default=False))
+    return_word_box: bool = Field(default_factory=lambda: _env_bool("PPOCRV6_RETURN_WORD_BOX", default=False))
 
     rapidocr_params: dict = Field(default_factory=dict)
 

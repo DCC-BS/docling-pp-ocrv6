@@ -30,7 +30,7 @@ from docling_core.types.doc.page import BoundingRectangle, TextCell
 from docling_pp_ocrv6.options import PPOCRv6Options
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from docling.datamodel.accelerator_options import AcceleratorOptions
     from docling.datamodel.base_models import Page
@@ -42,6 +42,70 @@ logger = logging.getLogger(__name__)
 _ONNX_FILE = "inference.onnx"
 _CONFIG_FILE = "inference.yml"
 _REC_KEYS_FILE = "ppocrv6_keys.txt"
+
+
+#: What RapidOCR gives per line when asked for word boxes: the word, how sure
+#: it is, and the four corners it was read in, or None when it could not place it.
+type WordResults = Sequence[Sequence[tuple[str, float, Sequence[Sequence[float]] | None]]] | None
+
+
+def _word_cells(
+    word_results: WordResults,
+    ocr_rect: BoundingBox,
+    scale: float,
+    first_index: int,
+) -> list[TextCell]:
+    """The words of every line the recogniser read, in the page's own points.
+
+    Each word keeps the quadrilateral it was read in, so a word of a line
+    running at an angle is not widened into an upright box around it.
+    """
+    cells: list[TextCell] = []
+    for line in word_results or ():
+        for text, confidence, polygon in line:
+            if polygon is None or not str(text).strip():
+                continue
+            (x0, y0), (x1, y1), (x2, y2), (x3, y3) = (
+                ((x / scale) + ocr_rect.l, (y / scale) + ocr_rect.t) for x, y in polygon
+            )
+            cells.append(
+                TextCell(
+                    index=first_index + len(cells),
+                    text=text,
+                    orig=text,
+                    confidence=confidence,
+                    from_ocr=True,
+                    rect=BoundingRectangle(
+                        r_x0=x0,
+                        r_y0=y0,
+                        r_x1=x1,
+                        r_y1=y1,
+                        r_x2=x2,
+                        r_y2=y2,
+                        r_x3=x3,
+                        r_y3=y3,
+                        coord_origin=CoordOrigin.TOPLEFT,
+                    ),
+                )
+            )
+    return cells
+
+
+def _post_process(
+    model: BaseOcrModel,
+    cells: list[TextCell],
+    page: Page,
+    conv_res: ConversionResult,
+) -> None:
+    """Hand the read cells to docling, whichever docling this is.
+
+    Newer docling takes the conversion result as well, to record the OCR
+    confidence of the page; older docling does not know the argument.
+    """
+    try:
+        model.post_process_cells(cells, page, conv_res)
+    except TypeError:
+        model.post_process_cells(cells, page)
 
 
 class PPOCRv6Model(BaseOcrModel):
@@ -201,6 +265,25 @@ class PPOCRv6Model(BaseOcrModel):
 
         return local_dir
 
+    def get_ocr_rects(self, page: Page) -> list[BoundingBox]:
+        """What to read on this page: the whole of it, or docling's own choice.
+
+        Docling crops the page into the boxes its layout model found. Those
+        are drawn around what a region means, and a line of text that crosses
+        one is handed to the recogniser cut in two.
+        """
+        if not self.options.whole_page or page.size is None:
+            return super().get_ocr_rects(page)
+        return [
+            BoundingBox(
+                l=0,
+                t=0,
+                r=page.size.width,
+                b=page.size.height,
+                coord_origin=CoordOrigin.TOPLEFT,
+            )
+        ]
+
     def __call__(self, conv_res: ConversionResult, page_batch: Iterable[Page]) -> Iterable[Page]:
         """Run OCR on each page crop and yield pages with recognised text cells."""
         if not self.enabled:
@@ -215,6 +298,7 @@ class PPOCRv6Model(BaseOcrModel):
             with TimeRecorder(conv_res, "ocr"):
                 ocr_rects = self.get_ocr_rects(page)
                 all_ocr_cells: list[TextCell] = []
+                all_ocr_words: list[TextCell] = []
                 cell_idx = 0
 
                 for ocr_rect in ocr_rects:
@@ -230,9 +314,18 @@ class PPOCRv6Model(BaseOcrModel):
                             use_det=self.options.use_det,
                             use_cls=self.options.use_cls,
                             use_rec=self.options.use_rec,
+                            return_word_box=self.options.return_word_box,
                         ),
                     )
                     # a disabled stage means the matching attribute is absent
+                    all_ocr_words.extend(
+                        _word_cells(
+                            getattr(result, "word_results", None),
+                            ocr_rect,
+                            self.scale,
+                            len(all_ocr_words),
+                        )
+                    )
                     boxes = getattr(result, "boxes", None) if result is not None else None
                     txts = getattr(result, "txts", None)
                     scores = getattr(result, "scores", None)
@@ -262,7 +355,12 @@ class PPOCRv6Model(BaseOcrModel):
                         )
                         cell_idx += 1
 
-                self.post_process_cells(all_ocr_cells, page)
+                _post_process(self, all_ocr_cells, page, conv_res)
+                if all_ocr_words and page.parsed_page is not None:
+                    # post-processing writes the lines and leaves the words of
+                    # the text layer alone, so the read words are added after it.
+                    page.parsed_page.word_cells = [*page.parsed_page.word_cells, *all_ocr_words]
+                    page.parsed_page.has_words = True
 
             if settings.debug.visualize_ocr:
                 self.draw_ocr_rects_and_cells(conv_res, page, ocr_rects)
