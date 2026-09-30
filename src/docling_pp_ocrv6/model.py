@@ -103,7 +103,8 @@ def _post_process(
     confidence of the page; older docling does not know the argument.
     """
     try:
-        model.post_process_cells(cells, page, conv_res)
+        # the locked docling (2.104) has the older signature, docling-serve 1.35 (2.130) this one
+        model.post_process_cells(cells, page, conv_res)  # ty: ignore[too-many-positional-arguments]
     except TypeError:
         model.post_process_cells(cells, page)
 
