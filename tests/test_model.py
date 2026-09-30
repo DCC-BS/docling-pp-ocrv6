@@ -265,3 +265,116 @@ def test_resolve_models_downloads_and_extracts_keys(monkeypatch, tmp_path):
     assert rec_p.name == "inference.onnx"
     assert keys_p.read_text(encoding="utf-8") == "a\nb\n"
     assert cls_p is None
+
+
+def _page_with_words(words):
+    backend = MagicMock()
+    backend.is_valid.return_value = True
+    backend.get_page_image.return_value = MagicMock()
+    return SimpleNamespace(
+        _backend=backend,
+        parsed_page=SimpleNamespace(word_cells=list(words), has_words=bool(words)),
+    )
+
+
+def test_whole_page_reads_the_page_as_one_rect(mock_model):
+    model, _ = mock_model
+    model.options.whole_page = True
+    page = SimpleNamespace(size=SimpleNamespace(width=595, height=842))
+
+    rects = model.get_ocr_rects(page)
+
+    assert len(rects) == 1
+    assert (rects[0].l, rects[0].t, rects[0].r, rects[0].b) == (0, 0, 595, 842)
+
+
+def test_without_whole_page_docling_chooses_the_rects(mock_model, monkeypatch):
+    from docling.models.base_ocr_model import BaseOcrModel
+
+    model, _ = mock_model
+    layout_rect = BoundingBox(l=10, t=10, r=20, b=20, coord_origin=CoordOrigin.TOPLEFT)
+    monkeypatch.setattr(BaseOcrModel, "get_ocr_rects", lambda self, page: [layout_rect])
+    page = SimpleNamespace(size=SimpleNamespace(width=595, height=842))
+
+    assert model.get_ocr_rects(page) == [layout_rect]
+
+
+def test_word_cells_are_placed_in_page_points():
+    from docling_pp_ocrv6.model import _word_cells
+
+    rect = BoundingBox(l=100, t=200, r=400, b=300, coord_origin=CoordOrigin.TOPLEFT)
+    word_results = [
+        [
+            ("Anna", 0.9, [[0, 0], [30, 0], [30, 15], [0, 15]]),
+            ("Muster", 0.8, [[36, 0], [90, 0], [90, 15], [36, 15]]),
+        ],
+        # unplaced and blank words are dropped
+        [("lost", 0.7, None), (" ", 0.7, [[0, 0], [3, 0], [3, 3], [0, 3]])],
+    ]
+
+    cells = _word_cells(word_results, rect, scale=3, first_index=5)
+
+    assert [c.text for c in cells] == ["Anna", "Muster"]
+    assert [c.index for c in cells] == [5, 6]
+    assert all(c.from_ocr for c in cells)
+    box = cells[1].rect
+    assert (box.r_x0, box.r_y0, box.r_x2, box.r_y2) == (112, 200, 130, 205)
+
+
+def test_word_cells_without_word_results():
+    from docling_pp_ocrv6.model import _word_cells
+
+    rect = BoundingBox(l=0, t=0, r=10, b=10, coord_origin=CoordOrigin.TOPLEFT)
+    assert _word_cells(None, rect, scale=3, first_index=0) == []
+
+
+def test_return_word_box_adds_read_words_after_the_text_layer(mock_model, monkeypatch):
+    model, _ = mock_model
+    model.options.return_word_box = True
+    rect = BoundingBox(l=0, t=0, r=100, b=50, coord_origin=CoordOrigin.TOPLEFT)
+    monkeypatch.setattr(model, "get_ocr_rects", lambda page: [rect])
+    lines: list = []
+    monkeypatch.setattr(model, "post_process_cells", lambda cells, page: lines.extend(cells))
+
+    model.reader.return_value = SimpleNamespace(
+        boxes=np.array([[[0, 0], [90, 0], [90, 15], [0, 15]]]),
+        txts=["Anna Muster"],
+        scores=[0.9],
+        word_results=[
+            [
+                ("Anna", 0.9, [[0, 0], [30, 0], [30, 15], [0, 15]]),
+                ("Muster", 0.9, [[36, 0], [90, 0], [90, 15], [36, 15]]),
+            ]
+        ],
+    )
+    text_layer_word = object()
+    page = _page_with_words([text_layer_word])
+
+    list(model(MagicMock(), iter([page])))
+
+    assert model.reader.call_args.kwargs["return_word_box"] is True
+    # the line is read as before; the words come in addition
+    assert [c.text for c in lines] == ["Anna Muster"]
+    words = page.parsed_page.word_cells
+    assert words[0] is text_layer_word
+    assert [w.text for w in words[1:]] == ["Anna", "Muster"]
+    assert page.parsed_page.has_words is True
+
+
+def test_without_word_results_the_words_stay_untouched(mock_model, monkeypatch):
+    model, _ = mock_model
+    rect = BoundingBox(l=0, t=0, r=100, b=50, coord_origin=CoordOrigin.TOPLEFT)
+    monkeypatch.setattr(model, "get_ocr_rects", lambda page: [rect])
+    monkeypatch.setattr(model, "post_process_cells", lambda cells, page: None)
+    model.reader.return_value = SimpleNamespace(
+        boxes=np.array([[[0, 0], [90, 0], [90, 15], [0, 15]]]),
+        txts=["Anna Muster"],
+        scores=[0.9],
+    )
+    page = _page_with_words([])
+
+    list(model(MagicMock(), iter([page])))
+
+    assert model.reader.call_args.kwargs["return_word_box"] is False
+    assert page.parsed_page.word_cells == []
+    assert page.parsed_page.has_words is False

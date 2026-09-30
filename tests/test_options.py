@@ -67,8 +67,24 @@ class TestDefaults:
             assert opts.rec_keys_path is None
             assert opts.cls_model_path is None
 
+    def test_default_word_box_options_off(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PPOCRV6_WHOLE_PAGE", None)
+            os.environ.pop("PPOCRV6_RETURN_WORD_BOX", None)
+            opts = PPOCRv6Options()
+            assert opts.whole_page is False
+            assert opts.return_word_box is False
+
 
 class TestEnvVars:
+    def test_env_whole_page(self):
+        with patch.dict(os.environ, {"PPOCRV6_WHOLE_PAGE": "true"}):
+            assert PPOCRv6Options().whole_page is True
+
+    def test_env_return_word_box(self):
+        with patch.dict(os.environ, {"PPOCRV6_RETURN_WORD_BOX": "true"}):
+            assert PPOCRv6Options().return_word_box is True
+
     def test_env_lang_multiple(self):
         with patch.dict(os.environ, {"PPOCRV6_LANG": "en,de,fr"}):
             assert PPOCRv6Options().lang == ["en", "de", "fr"]
