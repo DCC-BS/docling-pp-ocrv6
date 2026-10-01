@@ -1,6 +1,6 @@
 [project]
 name = "docling-pp-ocrv6"
-version = "0.1.0"
+version = "0.2.0"
 description = "A docling OCR plugin for PaddlePaddle PP-OCRv6 (ONNX via RapidOCR)"
 authors = [
     {name = "Yanick Schraner", email = "yanick.schraner@bs.ch"},

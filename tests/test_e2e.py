@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
@@ -102,3 +103,26 @@ class TestRealOcr:
     def test_blank_image_yields_no_cells(self, e2e_model):
         cells = _run_call(e2e_model, Image.new("RGB", (300, 120), color="white"))
         assert cells == []
+
+    @pytest.mark.parametrize("return_word_box", [True, False])
+    def test_a_region_without_text_does_not_fail(self, e2e_model, monkeypatch, return_word_box):
+        # RapidOCR answers a placeholder word here, asked for words or not
+        monkeypatch.setattr(e2e_model.options, "return_word_box", return_word_box)
+        # a colour gradient: a picture, with nothing a letter could be read in
+        ramp = np.linspace(40, 220, 300, dtype=np.uint8)
+        picture = Image.fromarray(
+            np.stack(
+                [np.tile(ramp, (300, 1)), np.tile(ramp[:, None], (1, 300)), np.full((300, 300), 120, np.uint8)], axis=-1
+            )
+        )
+        assert _run_call(e2e_model, picture) == []
+
+    def test_reads_each_word_with_its_box(self, e2e_model):
+        from docling_pp_ocrv6.model import _word_cells
+
+        image = _make_text_image("Total 1234.56")
+        result = e2e_model.reader(np.array(image), return_word_box=True)
+        words = _word_cells(result.word_results, _make_ocr_rect(image.width, image.height), scale=1)
+        assert [w.text for w in words] == ["Total", "1234.56"]
+        first, second = (w.rect.to_bounding_box() for w in words)
+        assert first.r <= second.l
