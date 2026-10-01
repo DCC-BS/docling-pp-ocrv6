@@ -47,6 +47,9 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Run tests with coverage
+        # PPOCRV6_E2E runs the real PP-OCRv6 models too (downloaded from HuggingFace)
+        env:
+          PPOCRV6_E2E: "1"
         run: uv run pytest --cov --cov-report=xml --junitxml=junit.xml
 
       - name: Upload coverage to Codecov

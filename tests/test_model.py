@@ -188,80 +188,243 @@ def test_missing_rapidocr_raises(monkeypatch, stub_models):
         )
 
 
-def test_download_models_calls_hf(monkeypatch, tmp_path):
-    calls = []
+_REC_CONFIG = "PostProcess:\n  character_dict:\n    - a\n    - b\n"
+
+
+def _fake_hub(calls: list):
+    """hf_hub_download, writing a stand-in for each file it is asked for."""
 
     def fake_download(repo, filename, local_dir, *, force_download=False):
-        calls.append((repo, filename))
-        return str(local_dir)
+        calls.append((repo, filename, force_download))
+        (local_dir / filename).write_text(_REC_CONFIG if filename == "inference.yml" else "x", encoding="utf-8")
+        return str(local_dir / filename)
 
+    return fake_download
+
+
+def test_download_models_calls_hf(monkeypatch, tmp_path):
     import huggingface_hub
 
-    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
-    out = PPOCRv6Model.download_models(
-        det_repo="org/det",
-        rec_repo="org/rec",
-        local_dir=tmp_path,
-    )
+    calls: list = []
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_hub(calls))
+    out = PPOCRv6Model.download_models(det_repo="org/det", rec_repo="org/rec", local_dir=tmp_path)
     assert out == tmp_path
-    assert (tmp_path / "det").is_dir()
-    assert (tmp_path / "rec").is_dir()
-    assert ("org/det", "inference.onnx") in calls
-    assert ("org/rec", "inference.onnx") in calls
-    assert ("org/rec", "inference.yml") in calls
+    assert [(repo, name) for repo, name, _ in calls] == [
+        ("org/det", "inference.onnx"),
+        ("org/rec", "inference.onnx"),
+        ("org/rec", "inference.yml"),
+    ]
+    # the keys are written at download time, so a baked image needs no write later
+    assert (tmp_path / "rec" / "ppocrv6_keys.txt").read_text(encoding="utf-8") == "a\nb\n"
 
 
 def test_download_models_force_passed_through(monkeypatch, tmp_path):
-    seen = []
-
-    def fake_download(repo, filename, local_dir, force_download):
-        seen.append(force_download)
-        return str(local_dir)
-
     import huggingface_hub
 
-    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    calls: list = []
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_hub(calls))
     PPOCRv6Model.download_models(local_dir=tmp_path, force=True)
-    assert seen == [True, True, True]
+    assert [force for _, _, force in calls] == [True, True, True]
+
+
+def _unbuilt_model(artifacts_path, **options):
+    model = PPOCRv6Model.__new__(PPOCRv6Model)
+    model.artifacts_path = artifacts_path
+    model.options = PPOCRv6Options(**options)
+    return model
+
+
+def _no_download(**_):
+    msg = "must not download"
+    raise AssertionError(msg)
 
 
 def test_resolve_models_explicit_paths(monkeypatch, tmp_path):
-    det = tmp_path / "d.onnx"
-    rec = tmp_path / "r.onnx"
-    keys = tmp_path / "k.txt"
+    det, rec, keys = tmp_path / "d.onnx", tmp_path / "r.onnx", tmp_path / "k.txt"
     for f in (det, rec, keys):
         f.write_text("x")
+    monkeypatch.setattr(PPOCRv6Model, "download_models", staticmethod(_no_download))
 
-    monkeypatch.setattr(PPOCRv6Model, "download_models", staticmethod(lambda **_: tmp_path))
+    model = _unbuilt_model(tmp_path, det_model_path=str(det), rec_model_path=str(rec), rec_keys_path=str(keys))
+    assert model._resolve_models() == (det, rec, keys, None)
 
-    model = PPOCRv6Model.__new__(PPOCRv6Model)
-    model.options = PPOCRv6Options(
-        det_model_path=str(det),
-        rec_model_path=str(rec),
-        rec_keys_path=str(keys),
+
+def test_resolve_models_uses_models_in_artifacts_path(monkeypatch, tmp_path):
+    # what an image bakes: the files under <artifacts_path>/PPOCRv6
+    local = tmp_path / "PPOCRv6"
+    (local / "det").mkdir(parents=True)
+    (local / "rec").mkdir()
+    (local / "det" / "inference.onnx").write_text("x")
+    (local / "rec" / "inference.onnx").write_text("x")
+    (local / "rec" / "ppocrv6_keys.txt").write_text("a\n")
+    monkeypatch.setattr(PPOCRv6Model, "download_models", staticmethod(_no_download))
+
+    det_p, rec_p, keys_p, cls_p = _unbuilt_model(tmp_path)._resolve_models()
+    assert (det_p, rec_p, keys_p) == (
+        local / "det" / "inference.onnx",
+        local / "rec" / "inference.onnx",
+        local / "rec" / "ppocrv6_keys.txt",
     )
-    det_p, rec_p, keys_p, cls_p = model._resolve_models()
-    assert det_p == det
-    assert rec_p == rec
-    assert keys_p == keys
     assert cls_p is None
 
 
-def test_resolve_models_downloads_and_extracts_keys(monkeypatch, tmp_path):
-    (tmp_path / "rec").mkdir()
-    (tmp_path / "det").mkdir()
-    (tmp_path / "det" / "inference.onnx").write_text("x")
-    (tmp_path / "rec" / "inference.onnx").write_text("x")
-    (tmp_path / "rec" / "inference.yml").write_text(
-        "PostProcess:\n  character_dict:\n    - a\n    - b\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(PPOCRv6Model, "download_models", staticmethod(lambda **_: tmp_path))
+def test_resolve_models_downloads_what_is_missing(monkeypatch, tmp_path):
+    import huggingface_hub
 
-    model = PPOCRv6Model.__new__(PPOCRv6Model)
-    model.options = PPOCRv6Options()
-    det_p, rec_p, keys_p, cls_p = model._resolve_models()
-    assert det_p.name == "inference.onnx"
-    assert rec_p.name == "inference.onnx"
+    calls: list = []
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_hub(calls))
+
+    det_p, rec_p, keys_p, _ = _unbuilt_model(tmp_path)._resolve_models()
+    assert len(calls) == 3
+    assert det_p.exists()
+    assert rec_p.exists()
     assert keys_p.read_text(encoding="utf-8") == "a\nb\n"
-    assert cls_p is None
+
+
+# --- words -----------------------------------------------------------------
+
+_ANNA = ("Anna", 0.9, [[0, 0], [30, 0], [30, 15], [0, 15]])
+_MUSTER = ("Muster", 0.9, [[36, 0], [90, 0], [90, 15], [36, 15]])
+#: What RapidOCR answers where it read nothing, asked for words or not.
+_READ_NOTHING = (("", 1.0, None),)
+
+
+def _rect(left, top, right, bottom):
+    from docling_core.types.doc.page import BoundingRectangle
+
+    return BoundingRectangle.from_bounding_box(
+        BoundingBox(l=left, t=top, r=right, b=bottom, coord_origin=CoordOrigin.TOPLEFT)
+    )
+
+
+def _text_layer_word(text, box, *, invisible=False):
+    from docling_core.types.doc.page import PdfCellRenderingMode, PdfTextCell
+
+    return PdfTextCell(
+        index=0,
+        text=text,
+        orig=text,
+        rect=_rect(*box),
+        from_ocr=False,
+        rendering_mode=PdfCellRenderingMode.INVISIBLE if invisible else PdfCellRenderingMode.FILL_TEXT,
+        text_direction="left_to_right",
+        font_key="f",
+        font_name="f",
+        widget=False,
+    )
+
+
+def _page(*words):
+    backend = MagicMock()
+    backend.is_valid.return_value = True
+    backend.get_page_image.return_value = MagicMock()
+    return SimpleNamespace(
+        _backend=backend,
+        size=SimpleNamespace(width=595, height=842),
+        parsed_page=SimpleNamespace(word_cells=list(words), has_words=bool(words)),
+    )
+
+
+def _run(model, monkeypatch, page, word_results, rect=None):
+    rect = rect or BoundingBox(l=0, t=0, r=100, b=50, coord_origin=CoordOrigin.TOPLEFT)
+    monkeypatch.setattr(model, "get_ocr_rects", lambda page: [rect])
+    lines: list = []
+    monkeypatch.setattr(model, "post_process_cells", lambda cells, page: lines.extend(cells))
+    model.reader.return_value = SimpleNamespace(
+        boxes=np.array([[[0, 0], [90, 0], [90, 15], [0, 15]]]),
+        txts=["Anna Muster"],
+        scores=[0.9],
+        word_results=word_results,
+    )
+    list(model(MagicMock(), iter([page])))
+    return lines
+
+
+def test_whole_page_reads_the_page_as_one_rect(mock_model):
+    model, _ = mock_model
+    model.options.whole_page = True
+    rects = model.get_ocr_rects(SimpleNamespace(size=SimpleNamespace(width=595, height=842)))
+    assert [(r.l, r.t, r.r, r.b) for r in rects] == [(0, 0, 595, 842)]
+
+
+def test_without_whole_page_docling_chooses_the_rects(mock_model, monkeypatch):
+    from docling.models.base_ocr_model import BaseOcrModel
+
+    model, _ = mock_model
+    layout_rect = BoundingBox(l=10, t=10, r=20, b=20, coord_origin=CoordOrigin.TOPLEFT)
+    monkeypatch.setattr(BaseOcrModel, "get_ocr_rects", lambda self, page: [layout_rect])
+    assert model.get_ocr_rects(SimpleNamespace(size=SimpleNamespace(width=595, height=842))) == [layout_rect]
+
+
+def test_word_cells_are_placed_in_page_points():
+    from docling_pp_ocrv6.model import _word_cells
+
+    rect = BoundingBox(l=100, t=200, r=400, b=300, coord_origin=CoordOrigin.TOPLEFT)
+    cells = _word_cells([[_ANNA, _MUSTER]], rect, scale=3)
+    assert [c.text for c in cells] == ["Anna", "Muster"]
+    assert all(c.from_ocr for c in cells)
+    box = cells[1].rect
+    assert (box.r_x0, box.r_y0, box.r_x2, box.r_y2) == (112, 200, 130, 205)
+
+
+def test_word_cells_skip_placeholders_and_unplaced_words():
+    from docling_pp_ocrv6.model import _word_cells
+
+    rect = BoundingBox(l=0, t=0, r=10, b=10, coord_origin=CoordOrigin.TOPLEFT)
+    assert _word_cells(_READ_NOTHING, rect, scale=3) == []
+    assert _word_cells([[("lost", 0.7, None), (" ", 0.7, _ANNA[2])]], rect, scale=3) == []
+    assert _word_cells(None, rect, scale=3) == []
+
+
+@pytest.mark.parametrize("return_word_box", [True, False])
+def test_a_region_read_empty_does_not_fail(mock_model, monkeypatch, return_word_box):
+    model, _ = mock_model
+    model.options.return_word_box = return_word_box
+    page = _page()
+    _run(model, monkeypatch, page, _READ_NOTHING)
+    assert page.parsed_page.word_cells == []
+
+
+def test_return_word_box_adds_read_words_after_the_text_layer(mock_model, monkeypatch):
+    model, _ = mock_model
+    model.options.return_word_box = True
+    # a word drawn elsewhere on the page
+    drawn = _text_layer_word("Seite", (500, 800, 520, 810))
+    page = _page(drawn)
+
+    lines = _run(model, monkeypatch, page, [[_ANNA, _MUSTER]])
+
+    assert model.reader.call_args.kwargs["return_word_box"] is True
+    assert [c.text for c in lines] == ["Anna Muster"]
+    words = page.parsed_page.word_cells
+    assert words[0] is drawn
+    assert [(w.text, w.index) for w in words[1:]] == [("Anna", 1), ("Muster", 2)]
+
+
+def test_words_are_not_added_unless_asked(mock_model, monkeypatch):
+    model, _ = mock_model
+    page = _page()
+    _run(model, monkeypatch, page, [[_ANNA, _MUSTER]])
+    assert model.reader.call_args.kwargs["return_word_box"] is False
+    assert page.parsed_page.word_cells == []
+    assert page.parsed_page.has_words is False
+
+
+def test_a_word_the_text_layer_draws_is_not_doubled(mock_model, monkeypatch):
+    model, _ = mock_model
+    model.options.return_word_box = True
+    # "Anna" is drawn where OCR reads it (at 1/3 scale: 0,0-10,5); "Muster" only shows in the pixels
+    drawn = _text_layer_word("Anna", (1, 1, 9, 4))
+    page = _page(drawn)
+    _run(model, monkeypatch, page, [[_ANNA, _MUSTER]])
+    assert [w.text for w in page.parsed_page.word_cells] == ["Anna", "Muster"]
+    assert page.parsed_page.word_cells[0] is drawn
+
+
+def test_a_word_over_invisible_text_is_kept(mock_model, monkeypatch):
+    model, _ = mock_model
+    model.options.return_word_box = True
+    hidden = _text_layer_word("Anna", (1, 1, 9, 4), invisible=True)
+    page = _page(hidden)
+    _run(model, monkeypatch, page, [[_ANNA]])
+    assert [(w.text, w.from_ocr) for w in page.parsed_page.word_cells] == [("Anna", False), ("Anna", True)]
