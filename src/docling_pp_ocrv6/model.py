@@ -156,10 +156,11 @@ def _post_process(
     confidence of the page; older docling does not know the argument.
     """
     try:
-        # the locked docling (2.104) has the older signature, docling-serve 1.35 (2.130) this one
-        model.post_process_cells(cells, page, conv_res)  # ty: ignore[too-many-positional-arguments]
+        # the locked docling (2.142) and docling-serve 1.35+ (2.130) have this signature
+        model.post_process_cells(cells, page, conv_res)
     except TypeError:
-        model.post_process_cells(cells, page)
+        # older docling (e.g. 2.104) has no conv_res argument
+        model.post_process_cells(cells, page)  # ty: ignore[missing-argument]
 
 
 class PPOCRv6Model(BaseOcrModel):
