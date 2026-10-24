@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 # v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@447e6d02b15d65b3247cce2d6019f11957285d11 # v6
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
