@@ -161,4 +161,9 @@ exclude_lines = [
     "@(abc\\.)?abstractmethod",
 ]
 
-
+[tool.uv]
+# Supply-chain cooldown: only resolve releases older than 7 days.
+exclude-newer = "P7D"
+# TEMPORARY until 2026-10-30: security releases of certifi/pillow/setuptools/virtualenv (pillow 13 needs docling >= 2.142, so the docling packages stay current too) younger than 7 days. The weekly
+# dependency routine removes these entries once the locked versions are 7 days old.
+exclude-newer-package = { certifi = "P0D", pillow = "P0D", setuptools = "P0D", virtualenv = "P0D", doclang = "P0D", docling = "P0D", docling-core = "P0D", docling-ibm-models = "P0D", docling-parse = "P0D", docling-slim = "P0D" }
