@@ -16,18 +16,6 @@ resolution-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
-[options.exclude-newer-package]
-certifi = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-doclang = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-docling = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-docling-core = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-docling-ibm-models = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-docling-parse = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-docling-slim = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-pillow = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-setuptools = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-virtualenv = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-
 [[package]]
 name = "accelerate"
 version = "1.14.0"
