@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 from docling.datamodel.pipeline_options import OcrOptions
 from pydantic import ConfigDict, Field
@@ -86,7 +86,7 @@ class PPOCRv6Options(OcrOptions):
             the engine defaults.
     """
 
-    kind: ClassVar[Literal["pp-ocrv6"]] = "pp-ocrv6"
+    kind: ClassVar[str] = "pp-ocrv6"
 
     lang: list[str] = Field(default_factory=lambda: os.environ.get("PPOCRV6_LANG", _DEFAULT_LANGS).split(","))
     text_score: float = Field(default_factory=lambda: float(os.environ.get("PPOCRV6_TEXT_SCORE", "0.5")))
