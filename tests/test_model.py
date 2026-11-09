@@ -42,6 +42,20 @@ def test_build_passes_expected_params(mock_model):
     assert params["Rec.rec_keys_path"].endswith("keys.txt")
     # No explicit cls model -> RapidOCR's bundled cls model is used.
     assert "Cls.model_path" not in params
+    assert params["EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search"] == "HEURISTIC"
+
+
+def test_rapidocr_params_override_cudnn_search(fake_rapidocr, stub_models):
+    from docling.datamodel.accelerator_options import AcceleratorOptions
+
+    key = "EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search"
+    PPOCRv6Model(
+        enabled=True,
+        artifacts_path=None,
+        options=PPOCRv6Options(rapidocr_params={key: "EXHAUSTIVE"}),
+        accelerator_options=AcceleratorOptions(),
+    )
+    assert fake_rapidocr.call_args.kwargs["params"][key] == "EXHAUSTIVE"
 
 
 def test_rapidocr_params_override(fake_rapidocr, stub_models):

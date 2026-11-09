@@ -230,6 +230,10 @@ class PPOCRv6Model(BaseOcrModel):
             "Cls.use_dml": use_dml,
             "EngineConfig.onnxruntime.use_cuda": use_cuda,
             "EngineConfig.onnxruntime.cuda_ep_cfg.device_id": gpu_id,
+            # RapidOCR's EXHAUSTIVE default benchmarks every cuDNN algorithm again for each new
+            # input size, and almost every crop and line batch has a new one. On an H100 that made
+            # OCR 4x slower; HEURISTIC is as fast as the best EXHAUSTIVE pick on Ada GPUs.
+            "EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search": "HEURISTIC",
         }
         # When no explicit cls model is given, let RapidOCR use its bundled cls model.
         if cls_path is not None:
