@@ -310,8 +310,11 @@ class FastRapidOcr:
         return mx.indices, mx.values
 
     def _host(self, shape: Sequence[int], dtype: torch.dtype) -> torch.Tensor:
-        """A host buffer; on CUDA a slice of this thread's pinned buffers, so copies to and from the
-        GPU do not wait for queued work and cost no page-locked allocation."""
+        """A host buffer; on CUDA a slice of this thread's pinned buffers.
+
+        Pinned, copies to and from the GPU do not wait for queued work; reused, they cost no
+        page-locked allocation.
+        """
         if not self.cuda:
             return torch.empty(tuple(shape), dtype=dtype)
         return self._arena().take(shape, dtype)
