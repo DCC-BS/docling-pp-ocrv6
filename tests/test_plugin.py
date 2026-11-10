@@ -15,10 +15,10 @@ def test_ocr_engines_returns_dict():
 
 def test_ocr_engines_contains_model_class():
     classes = ocr_engines()["ocr_engines"]
-    assert len(classes) == 1
-    assert issubclass(classes[0], BaseOcrModel)
+    assert len(classes) == 2
+    assert all(issubclass(c, BaseOcrModel) for c in classes)
 
 
 def test_registered_model_name():
-    cls = ocr_engines()["ocr_engines"][0]
-    assert cls.__name__ == "PPOCRv6Model"
+    names = [cls.__name__ for cls in ocr_engines()["ocr_engines"]]
+    assert names == ["PPOCRv6Model", "FastRapidOcrModel"]
