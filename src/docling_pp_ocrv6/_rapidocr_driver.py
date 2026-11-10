@@ -10,10 +10,10 @@ post-processing) and reproduces ``RapidOCR.__call__`` step by step, with these c
 * Queued GPU work: all OCR rectangles of a page batch go through one call. The det forwards of all
   of them are queued first; each image's detection post-processing on the CPU then overlaps the
   GPU work of the next ones, and its cls and rec batches are queued as soon as its crops are ready.
-  Inputs and results go through pinned buffers reused across calls, one wait per batch. The batches stay RapidOCR's own (per
-  image, sorted by aspect ratio, ``cls_batch_num`` / ``rec_batch_num`` lines, each padded to its own
-  width): on the GPU a convolution's result can depend on the batch size (TF32), so merging batches
-  would change the text.
+  Inputs and results go through pinned buffers reused across calls, one wait per batch. The
+  batches stay RapidOCR's own (per image, sorted by aspect ratio, ``cls_batch_num`` /
+  ``rec_batch_num`` lines, each padded to its own width): on the GPU a convolution's result can
+  depend on the batch size (TF32), so merging batches would change the text.
 * CUDA graphs: a forward (with its normalisation and CTC max) of an input shape seen before is
   captured once as a CUDA graph and replayed, which saves the launch overhead of its thousand small
   kernels. A replay runs exactly the kernels of the eager forward of the same shapes, so its result
