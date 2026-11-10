@@ -7,11 +7,11 @@ post-processing) and reproduces ``RapidOCR.__call__`` step by step, with two cha
   256-entry lookup table computed with RapidOCR's own numpy formula, so every value is bit-identical
   to the CPU path. Rec/cls padding and the CTC argmax/max also run on the GPU, and only the
   (lines x steps) indices and probabilities come back instead of the full softmax.
-* Batching: all OCR rectangles of a page batch go through one call. The det forwards are queued
-  back to back before the first result is read, cls runs on all text lines at once (its input is
-  padded to a fixed width, so batching does not change the maths), and rec keeps RapidOCR's exact
-  line grouping (per image, sorted by aspect ratio, chunks of ``rec_batch_num``, each padded to its
-  own width) but runs all chunks of the same padded width as one forward.
+* Queued GPU work: all OCR rectangles of a page batch go through one call, and the det, cls and
+  rec forwards of all of them are queued back to back before their results are read. The batches
+  stay RapidOCR's own (per image, sorted by aspect ratio, ``cls_batch_num`` / ``rec_batch_num``
+  lines, each padded to its own width): on the GPU a convolution's result can depend on the batch
+  size (TF32), so merging batches would change the text.
 
 Everything outside these steps (resizes with cv2, detection post-processing, crop warping, score
 filtering) is RapidOCR's own code, called in the same order. Written against rapidocr 3.10;
@@ -21,8 +21,8 @@ filtering) is RapidOCR's own code, called in the same order. Written against rap
 from __future__ import annotations
 
 import math
-from collections import defaultdict
 from dataclasses import dataclass, field
+from importlib.metadata import version
 from typing import Any
 
 import cv2
@@ -33,14 +33,9 @@ from rapidocr.utils.process_img import apply_vertical_padding, map_boxes_to_orig
 
 #: det forwards queued before their results are read back
 _DET_QUEUE = 8
-#: text lines per cls forward (its input has a fixed size)
-_CLS_CHUNK = 512
-#: rec: lines per forward times their padded width, at most
-_REC_PIXELS = 24000
 _RGB = 3
-
-#: One recognition input: image index, line index, the line resized to the rec height.
-type RecLine = tuple[int, int, np.ndarray]
+#: The rapidocr release whose ``RapidOCR.__call__`` this driver reproduces
+_RAPIDOCR_VERSION = "3.10."
 
 
 def supported(reader: Any) -> bool:  # noqa: ANN401
@@ -50,6 +45,8 @@ def supported(reader: Any) -> bool:  # noqa: ANN401
         from rapidocr.utils.model_resolver import normalize_lang  # noqa: PLC0415
         from rapidocr.utils.typings import EngineType  # noqa: PLC0415
 
+        if not version("rapidocr").startswith(_RAPIDOCR_VERSION):
+            return False  # its pipeline may differ from the one reproduced here
         cfg = reader.cfg
         return bool(
             normalize_lang(cfg.Rec.lang_type) not in RTL_LANGS
@@ -81,9 +78,8 @@ class _Image:
 class FastRapidOcr:
     """Runs a ``rapidocr.RapidOCR`` reader's det, cls and rec models on a list of images."""
 
-    def __init__(self, reader: Any, *, batch: bool = True) -> None:  # noqa: ANN401
+    def __init__(self, reader: Any) -> None:  # noqa: ANN401
         self.r = reader
-        self.batch = batch
         self.det = reader._load_det_model()  # noqa: SLF001
         self.cls = reader._load_cls_model()  # noqa: SLF001
         self.rec = reader._load_rec_model()  # noqa: SLF001
@@ -114,7 +110,7 @@ class FastRapidOcr:
         array in pinned memory lets the CPU go on preparing the next batch.
         """
         if self.dev.type != "cuda":
-            return torch.from_numpy(a)
+            return torch.from_numpy(a).to(self.dev)
         return torch.from_numpy(a).pin_memory().to(self.dev, non_blocking=True)
 
     def _det_input(self, resized: np.ndarray) -> torch.Tensor:
@@ -141,12 +137,7 @@ class FastRapidOcr:
 
     # ---------------------------------------------------------------- entry point
     def __call__(self, images: list[np.ndarray]) -> list[RapidOCROutput]:
-        """RapidOCR's result for every image (all at once, or one by one with ``batch=False``)."""
-        if not self.batch:
-            return [self._run([im])[0] for im in images]
-        return self._run(images)
-
-    def _run(self, images: list[np.ndarray]) -> list[RapidOCROutput]:
+        """RapidOCR's result for every image; the GPU work of all images is queued back to back."""
         items = [self._prepare(im) for im in images]
         with torch.no_grad():
             self._detect(items)
@@ -187,73 +178,59 @@ class FastRapidOcr:
             it.boxes = self.det.sorted_boxes(boxes)
             it.lines = list(self.r.crop_text_regions(it.img, it.boxes))
 
+    @staticmethod
+    def _chunks(lines: list[np.ndarray], size: int) -> list[np.ndarray]:
+        """RapidOCR's batches of one image's lines: sorted by aspect ratio, ``size`` lines each."""
+        order = np.argsort(np.array([im.shape[1] / float(im.shape[0]) for im in lines]))
+        return [order[b : b + size] for b in range(0, len(lines), size)]
+
     def _classify(self, items: list[_Image]) -> None:
-        """Angle classification of all lines at once (fixed-size input: grouping does not change the maths)."""
-        flat = [(it, k) for it in items for k in range(len(it.lines))]
+        """Angle classification in RapidOCR's own batches; all forwards queued before the first read-back.
+
+        The batches are RapidOCR's (per image, ``cls_batch_num`` lines): on the GPU a convolution's
+        result can depend on the batch size, so other batches could change the angle of a line.
+        """
         _, c_h, c_w = self.cls.cls_image_shape
-        for s in range(0, len(flat), _CLS_CHUNK):
-            part = flat[s : s + _CLS_CHUNK]
-            u8 = np.zeros((len(part), c_h, c_w, 3), dtype=np.uint8)
-            widths = np.zeros(len(part), dtype=np.int64)
-            for q, (it, k) in enumerate(part):
-                rw = self._resize_width(it.lines[k], c_h, c_w)
-                u8[q, :, :rw] = cv2.resize(it.lines[k], (rw, c_h), interpolation=cv2.INTER_LINEAR)
-                widths[q] = rw
-            prob = self.cls_net(self._rc_input(u8, widths)).cpu().numpy()
-            for (it, k), (label, score) in zip(part, self.cls.postprocess_op(prob), strict=True):
+        queued = []
+        for it in items:
+            for idxs in self._chunks(it.lines, self.cls.cls_batch_num):
+                u8 = np.zeros((len(idxs), c_h, c_w, 3), dtype=np.uint8)
+                widths = np.zeros(len(idxs), dtype=np.int64)
+                for q, k in enumerate(idxs):
+                    rw = self._resize_width(it.lines[k], c_h, c_w)
+                    u8[q, :, :rw] = cv2.resize(it.lines[k], (rw, c_h), interpolation=cv2.INTER_LINEAR)
+                    widths[q] = rw
+                queued.append((it, idxs, self.cls_net(self._rc_input(u8, widths))))
+        for it, idxs, prob in queued:
+            for k, (label, score) in zip(idxs, self.cls.postprocess_op(prob.cpu().numpy()), strict=True):
                 if "180" in label and score > self.cls.cls_thresh:
                     it.lines[k] = cv2.rotate(it.lines[k], cv2.ROTATE_180)
 
-    def _rec_chunks(self, items: list[_Image]) -> list[tuple[int, list[RecLine]]]:
-        """RapidOCR's rec chunks (per image, sorted by aspect ratio) with their padded width.
-
-        With ``batch``, all chunks of the same width are merged into one job.
-        """
+    def _recognise(self, items: list[_Image]) -> None:
+        """Recognition in RapidOCR's own batches, forwards queued; CTC argmax and max on the GPU, RapidOCR's decoder."""
         img_h = self.rec.rec_image_shape[1]
         base_ratio = self.rec.rec_image_shape[2] / img_h
-        bnum = self.rec.rec_batch_num
-        chunks: list[tuple[int, list[RecLine]]] = []
-        by_width: dict[int, list[RecLine]] = defaultdict(list)
-        for i, it in enumerate(items):
-            order = np.argsort(np.array([im.shape[1] / float(im.shape[0]) for im in it.lines]))
-            for b in range(0, len(it.lines), bnum):
-                idxs = order[b : b + bnum]
-                max_wh = max([base_ratio] + [it.lines[k].shape[1] * 1.0 / it.lines[k].shape[0] for k in idxs])
-                width = int(img_h * max_wh)
-                chunk = []
-                for k in idxs:
-                    rw = self._resize_width(it.lines[k], img_h, width)
-                    chunk.append((i, int(k), cv2.resize(it.lines[k], (rw, img_h))))
-                if self.batch:
-                    by_width[width].extend(chunk)
-                else:
-                    chunks.append((width, chunk))
-        return list(by_width.items()) if self.batch else chunks
-
-    def _recognise(self, items: list[_Image]) -> None:
-        """Rec forwards per padded width, CTC argmax and max on the GPU, RapidOCR's decoder."""
+        queued = []
         for it in items:
             it.txts = [""] * len(it.lines)
             it.scores = [0.0] * len(it.lines)
-        img_h = self.rec.rec_image_shape[1]
-        outs = []
-        for width, lines in self._rec_chunks(items):
-            per = max(1, min(len(lines), _REC_PIXELS // max(width, 1)))
-            for s in range(0, len(lines), per):
-                part = lines[s : s + per]
-                u8 = np.zeros((len(part), img_h, width, 3), dtype=np.uint8)
-                widths = np.zeros(len(part), dtype=np.int64)
-                for q, (_, _, im) in enumerate(part):
-                    u8[q, :, : im.shape[1]] = im
-                    widths[q] = im.shape[1]
+            for idxs in self._chunks(it.lines, self.rec.rec_batch_num):
+                max_wh = max([base_ratio] + [it.lines[k].shape[1] * 1.0 / it.lines[k].shape[0] for k in idxs])
+                width = int(img_h * max_wh)
+                u8 = np.zeros((len(idxs), img_h, width, 3), dtype=np.uint8)
+                widths = np.zeros(len(idxs), dtype=np.int64)
+                for q, k in enumerate(idxs):
+                    rw = self._resize_width(it.lines[k], img_h, width)
+                    u8[q, :, :rw] = cv2.resize(it.lines[k], (rw, img_h))
+                    widths[q] = rw
                 mx = self.rec_net(self._rc_input(u8, widths)).max(dim=2)
-                outs.append((part, mx.indices, mx.values))
+                queued.append((it, idxs, mx.indices, mx.values))
         decode = self.rec.postprocess_op.decode
-        for part, idx, prob in outs:
+        for it, idxs, idx, prob in queued:
             res, _ = decode(idx.cpu().numpy(), prob.cpu().numpy(), False, remove_duplicate=True)  # noqa: FBT003
-            for (i, k, _), (txt, score) in zip(part, res, strict=True):
-                items[i].txts[k] = txt
-                items[i].scores[k] = score
+            for k, (txt, score) in zip(idxs, res, strict=True):
+                it.txts[k] = txt
+                it.scores[k] = score
 
     def _final(self, it: _Image, boxes: np.ndarray) -> RapidOCROutput:
         """RapidOCR's final step: boxes back to the input image, empty and low-score lines dropped."""

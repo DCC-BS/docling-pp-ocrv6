@@ -5,12 +5,12 @@ rectangle and lets RapidOCR prepare every image on the CPU. On a GPU worker with
 OCR stage is bound by that CPU work, not by the models. This engine keeps docling's model, options
 and post-processing and changes only how a page batch is run:
 
-* Pages without OCR rectangles skip the rasterisation of their (empty) rectangle set.
 * Each page is rendered once at the OCR scale; every rectangle is cropped from that image with
   docling-parse's own crop function, which gives the pixels ``get_page_image(cropbox=...)`` gives.
 * With RapidOCR's PyTorch engine (``backend: torch``), all rectangles of a page batch go through
-  :class:`~docling_pp_ocrv6._rapidocr_driver.FastRapidOcr`: preprocessing on the GPU, det/cls/rec
-  batched, RapidOCR's own pre- and post-processing. Other backends call RapidOCR as docling does.
+  :class:`~docling_pp_ocrv6._rapidocr_driver.FastRapidOcr`: preprocessing on the GPU, the det/cls/rec
+  forwards of all of them queued back to back in RapidOCR's own batches, RapidOCR's own pre- and
+  post-processing. Other backends call RapidOCR as docling does.
 
 Select it with an OCR preset of kind ``rapidocr-fast``; it takes every option of docling's
 ``rapidocr`` kind, e.g. ``{"kind": "rapidocr-fast", "backend": "torch"}``.
@@ -19,7 +19,7 @@ Select it with an OCR preset of kind ``rapidocr-fast``; it takes every option of
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal, Self
 
 import numpy as np
 from docling.datamodel.pipeline_options import RapidOcrOptions
@@ -35,11 +35,37 @@ if TYPE_CHECKING:
     from docling.datamodel.base_models import Page
     from docling.datamodel.document import ConversionResult
     from docling.datamodel.pipeline_options import OcrOptions
-    from docling_core.types.doc import Size
 
     from docling_pp_ocrv6._rapidocr_driver import FastRapidOcr
 
 logger = logging.getLogger(__name__)
+
+
+class _PerPageTime:
+    """docling's ``TimeRecorder`` for a page batch: one sample per page, the batch time split evenly.
+
+    docling counts OCR time per page; one sample for the whole batch would report the pages of a
+    batch as one page taking their summed time.
+    """
+
+    def __init__(self, conv_res: ConversionResult, key: str, pages: int) -> None:
+        self._recorder = TimeRecorder(conv_res, key)
+        self._conv_res, self._key, self._pages = conv_res, key, pages
+
+    def __enter__(self) -> Self:
+        self._recorder.__enter__()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._recorder.__exit__(*exc)
+        item = self._conv_res.timings.get(self._key) if settings.debug.profile_pipeline_timings else None
+        if item is None or not item.times or self._pages <= 1:
+            return
+        share = item.times.pop() / self._pages
+        start = item.start_timestamps[-1]
+        item.times.extend([share] * self._pages)
+        item.start_timestamps.extend([start] * (self._pages - 1))
+        item.count += self._pages - 1
 
 
 def _is_docling_parse(backend: object) -> bool:
@@ -67,18 +93,6 @@ class FastRapidOcrModel(RapidOcrModel):
         """Return the options class for this OCR engine."""
         return FastRapidOcrOptions
 
-    def _deduplicate_rects(
-        self,
-        size: Size,
-        rects: Iterable[BoundingBox],
-        dilation_size: int = 0,
-    ) -> tuple[float, list[BoundingBox]]:
-        """No rectangles: no coverage and nothing to merge, which is what rasterising an empty set returns."""
-        rects = list(rects)
-        if not rects:
-            return 0.0, []
-        return super()._deduplicate_rects(size, rects, dilation_size=dilation_size)
-
     def __call__(self, conv_res: ConversionResult, page_batch: Iterable[Page]) -> Iterable[Page]:
         """OCR a page batch: every rectangle of every valid page in one pass."""
         if not self.enabled:
@@ -87,7 +101,7 @@ class FastRapidOcrModel(RapidOcrModel):
         pages = list(page_batch)
         valid = [p for p in pages if p._backend is not None and p._backend.is_valid()]  # noqa: SLF001
         if valid:
-            with TimeRecorder(conv_res, "ocr"):
+            with _PerPageTime(conv_res, "ocr", len(valid)):
                 self._ocr_pages(conv_res, valid)
         yield from pages
 
@@ -155,9 +169,10 @@ class FastRapidOcrModel(RapidOcrModel):
     def _ocr_pages(self, conv_res: ConversionResult, pages: list[Page]) -> None:
         work = []
         for page in pages:
-            rects = [r for r in self.get_ocr_rects(page) if r.area() != 0]
-            work.append((page, rects, self._page_images(page, rects)))
-        images = [im for _, _, ims in work for im in ims]
+            all_rects = self.get_ocr_rects(page)
+            rects = [r for r in all_rects if r.area() != 0]
+            work.append((page, all_rects, rects, self._page_images(page, rects)))
+        images = [im for _, _, _, ims in work for im in ims]
         driver = self._fast_driver()
         if driver is not None:
             results = driver(images)
@@ -169,11 +184,11 @@ class FastRapidOcrModel(RapidOcrModel):
                 for im in images
             ]
         pos = 0
-        for page, rects, _ in work:
+        for page, all_rects, rects, _ in work:
             cells: list[TextCell] = []
             for rect in rects:
                 cells.extend(self._cells(results[pos], rect))
                 pos += 1
             self.post_process_cells(cells, page, conv_res)
             if settings.debug.visualize_ocr:
-                self.draw_ocr_rects_and_cells(conv_res, page, rects)
+                self.draw_ocr_rects_and_cells(conv_res, page, all_rects)

@@ -94,12 +94,13 @@ batch is run:
 
 - each page is rendered once at the OCR scale and every OCR rectangle is cropped from it
   (docling renders the whole page once per rectangle);
-- pages without OCR rectangles skip rasterising the empty set;
 - with RapidOCR's PyTorch engine (`backend: torch`), all rectangles of a page batch go through one
-  pass: image normalisation, padding and the CTC argmax on the GPU, detection forwards queued back
-  to back, angle classification of all lines at once, and RapidOCR's recognition chunks of the same
-  padded width in one forward. RapidOCR's own pre- and post-processing does the rest. Other
-  backends, right-to-left languages and word boxes call RapidOCR per image as docling does.
+  pass: image normalisation, padding and the CTC argmax on the GPU, and the detection, angle and
+  recognition forwards of all rectangles queued back to back before their results are read. The
+  batches stay RapidOCR's own: on the GPU a convolution's result can depend on the batch size, so
+  other batches would change the text. RapidOCR's own pre- and post-processing does the rest.
+  Other backends, right-to-left languages, word boxes and rapidocr releases other than 3.10 call
+  RapidOCR per image as docling does.
 
 For docling-serve, as an OCR preset:
 
@@ -107,7 +108,7 @@ For docling-serve, as an OCR preset:
 DOCLING_SERVE_CUSTOM_OCR_PRESETS='{"rapidocr": {"kind": "rapidocr-fast", "backend": "torch"}}'
 ```
 
-Written against rapidocr 3.10 and docling-parse 7.x.
+Written against rapidocr 3.10 (checked at runtime) and docling-parse 7.x.
 
 ## Development
 

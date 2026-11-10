@@ -8,8 +8,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 from docling.datamodel.pipeline_options import RapidOcrOptions
-from docling.models.base_ocr_model import BaseOcrModel
-from docling_core.types.doc import BoundingBox, Size
+from docling_core.types.doc import BoundingBox, CoordOrigin
 from PIL import Image, ImageDraw, ImageFont
 
 from docling_pp_ocrv6.rapidocr_fast import FastRapidOcrModel, FastRapidOcrOptions
@@ -32,20 +31,6 @@ def _bare_model() -> FastRapidOcrModel:
     model.reader = MagicMock(name="RapidOCR")
     model._driver = False  # the per-image path: the reader mock is called as docling calls it
     return model
-
-
-def test_no_rects_skip_rasterising():
-    model = _bare_model()
-    assert model._deduplicate_rects(Size(width=600, height=800), iter([])) == (0.0, [])
-
-
-def test_rects_merge_as_docling_does():
-    model = _bare_model()
-    size = Size(width=600, height=800)
-    rects = [BoundingBox(l=10, t=10, r=100, b=50), BoundingBox(l=90, t=20, r=200, b=60)]
-    assert model._deduplicate_rects(size, iter(rects), dilation_size=2) == BaseOcrModel._deduplicate_rects(
-        model, size, iter(rects), dilation_size=2
-    )
 
 
 def _page(rects: list[BoundingBox]) -> SimpleNamespace:
@@ -100,9 +85,34 @@ def _text_image(lines: list[str], *, flip: bool = False) -> np.ndarray:
     return np.asarray(img)
 
 
+def _many_text_images(n: int) -> list[np.ndarray]:
+    """Text images with lines of many widths, some upside down: rec batches of the same padded width in many images."""
+    words = [
+        "Rechnung",
+        "Total CHF 1234.56",
+        "Kunde IBAN Zürich 31452",
+        "kurz",
+        "Crème brûlée café",
+        "Nr. 2026-114",
+        "Eine deutlich längere Zeile mit vielen Wörtern darin",
+        "Basel",
+        "MwSt 8.1 %",
+        "Seite 3 von 12",
+    ]
+    images = []
+    for i in range(n):
+        lines = [words[(i * 3 + k) % len(words)] for k in range(1 + i % 5)]
+        images.append(_text_image(lines, flip=i % 7 == 3))
+    return images
+
+
 @pytest.mark.e2e
 def test_driver_gives_rapidocrs_own_results():
-    """The batched driver returns what RapidOCR returns per image, bit for bit (needs RapidOCR's torch models)."""
+    """The driver returns what RapidOCR returns per image, bit for bit (needs RapidOCR's torch models).
+
+    Many images with lines of the same widths: on the GPU (TF32 convolutions) other batch sizes than
+    RapidOCR's would change scores and text here.
+    """
     torch = pytest.importorskip("torch")
     from rapidocr import EngineType, RapidOCR
 
@@ -113,23 +123,17 @@ def test_driver_gives_rapidocrs_own_results():
         params |= {"EngineConfig.torch.use_cuda": True, "EngineConfig.torch.cuda_ep_cfg.device_id": 0}
     reader = RapidOCR(params=params)
     assert supported(reader)
-    images = [
-        _text_image(["Rechnung Nr. 2026-114", "Total CHF 1234.56"]),
-        _text_image(["Crème brûlée café", "kurz", "Eine deutlich längere Zeile mit vielen Wörtern darin"]),
-        _text_image(["Auf dem Kopf stehender Text"], flip=True),
-        np.full((200, 300, 3), 255, dtype=np.uint8),
-    ]
+    images = [*_many_text_images(40), np.full((200, 300, 3), 255, dtype=np.uint8)]
     expected = [reader(im) for im in images]
-    for batch in (False, True):
-        got = FastRapidOcr(reader, batch=batch)(images)
-        for want, have in zip(expected, got, strict=True):
-            assert have.txts == want.txts
-            assert have.scores == want.scores
-            if want.boxes is None:
-                assert have.boxes is None
-            else:
-                np.testing.assert_array_equal(have.boxes, want.boxes)
-    assert any(r.txts for r in expected)
+    got = FastRapidOcr(reader)(images)
+    for want, have in zip(expected, got, strict=True):
+        assert have.txts == want.txts
+        assert have.scores == want.scores
+        if want.boxes is None:
+            assert have.boxes is None
+        else:
+            np.testing.assert_array_equal(have.boxes, want.boxes)
+    assert sum(len(r.txts or ()) for r in expected) > 80
 
 
 class _Pre:
@@ -197,16 +201,15 @@ def _fake_reader(torch):
     )
 
 
-def test_driver_batch_gives_the_per_image_results():
-    """All rectangles of a batch in one pass give what one image at a time gives; inputs normalised as on the CPU."""
+def test_driver_gives_the_per_image_results():
+    """All images in one call give what one image at a time gives; inputs normalised as on the CPU."""
     torch = pytest.importorskip("torch")
     from docling_pp_ocrv6._rapidocr_driver import FastRapidOcr
 
     rng = np.random.default_rng(7)
     images = [rng.integers(0, 256, (h, w, 3), dtype=np.uint8) for h, w in ((96, 400), (160, 230), (64, 900))]
     reader = _fake_reader(torch)
-    one = FastRapidOcr(reader, batch=False)
-    many = FastRapidOcr(reader, batch=True)
+    one = many = FastRapidOcr(reader)
 
     np.testing.assert_array_equal(
         one._det_input(images[0])[0].permute(1, 2, 0).numpy(), _Pre().normalize(images[0]).astype(np.float32)
@@ -217,10 +220,53 @@ def test_driver_batch_gives_the_per_image_results():
     np.testing.assert_array_equal(padded[0, :, :, :100].permute(1, 2, 0).numpy(), want[0])
     assert not padded[0, :, :, 100:].any()
 
-    want_all, got_all = one(images), many(images)
+    want_all, got_all = [one([im])[0] for im in images], many(images)
     assert len(got_all) == len(images)
     for want_res, got_res in zip(want_all, got_all, strict=True):
         assert got_res.txts == want_res.txts
         assert got_res.scores == want_res.scores
         np.testing.assert_array_equal(got_res.boxes, want_res.boxes)
     assert all(r.txts for r in got_all)
+
+
+def test_ocr_time_is_recorded_per_page(monkeypatch):
+    from docling.datamodel.settings import settings
+
+    model = _bare_model()
+    monkeypatch.setattr(settings.debug, "profile_pipeline_timings", True)
+    monkeypatch.setattr(model, "get_ocr_rects", lambda page: page.rects)
+    monkeypatch.setattr(model, "post_process_cells", lambda *_args: None)
+    model.reader.return_value = SimpleNamespace(boxes=None, txts=None, scores=None)
+    conv_res = SimpleNamespace(timings={})
+    rect = BoundingBox(l=10, t=20, r=110, b=60)
+    list(model(conv_res, [_page([rect]) for _ in range(3)]))
+    item = conv_res.timings["ocr"]
+    assert item.count == 3
+    assert len(item.times) == len(item.start_timestamps) == 3
+
+
+def test_page_images_are_docling_parses_crops(tmp_path):
+    """The single render cropped per rectangle gives the pixels of docling-parse's get_page_image(cropbox=...)."""
+    from docling.backend.docling_parse_backend import ThreadedDoclingParseDocumentBackend
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.document import InputDocument
+
+    image = Image.new("RGB", (612, 792), "white")
+    draw = ImageDraw.Draw(image)
+    for y in range(40, 760, 37):
+        draw.text((50, y), f"Line {y} with some text", fill="black")
+    image.save(tmp_path / "page.pdf", resolution=72)
+    doc = InputDocument(
+        path_or_stream=tmp_path / "page.pdf", format=InputFormat.PDF, backend=ThreadedDoclingParseDocumentBackend
+    )
+    backend = next(iter(doc._backend.iter_pages()))
+    size = backend.get_size()
+    rects = [
+        BoundingBox(l=10.3, t=20.7, r=300.2, b=400.9, coord_origin=CoordOrigin.TOPLEFT),
+        BoundingBox(l=0, t=0, r=size.width, b=size.height, coord_origin=CoordOrigin.TOPLEFT),
+        BoundingBox(l=100.5, t=700.25, r=611.9, b=791.99, coord_origin=CoordOrigin.TOPLEFT),
+    ]
+    model = _bare_model()
+    got = model._page_images(SimpleNamespace(_backend=backend), rects)
+    for rect, array in zip(rects, got, strict=True):
+        assert np.array_equal(array, np.asarray(backend.get_page_image(scale=model.scale, cropbox=rect)))
