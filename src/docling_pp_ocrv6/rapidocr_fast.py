@@ -29,10 +29,12 @@ from docling.utils.profiling import TimeRecorder
 from docling_core.types.doc import BoundingBox, CoordOrigin
 from docling_core.types.doc.page import BoundingRectangle, TextCell
 
+from docling_pp_ocrv6._ocr_rects import deduplicate_rects
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from docling.datamodel.base_models import Page
+    from docling.datamodel.base_models import Page, Size
     from docling.datamodel.document import ConversionResult
     from docling.datamodel.pipeline_options import OcrOptions
 
@@ -120,6 +122,17 @@ class FastRapidOcrModel(RapidOcrModel):
                 logger.info("rapidocr-fast: batched driver needs the torch backend with det, cls and rec; per image")
                 self._driver = False
         return None if self._driver is False else self._driver
+
+    def _deduplicate_rects(
+        self, size: Size, rects: Iterable[BoundingBox], dilation_size: int = 0
+    ) -> tuple[float, list[BoundingBox]]:
+        """Docling's OCR rectangle deduplication, computed on the rectangles (same result, no page raster)."""
+        rects = list(rects)
+        fast = deduplicate_rects(size, rects, dilation_size)
+        if fast is None:
+            return super()._deduplicate_rects(size, rects, dilation_size=dilation_size)
+        coverage, boxes = fast
+        return coverage, self._drop_contained_rects(boxes)
 
     def _page_images(self, page: Page, rects: list[BoundingBox]) -> list[np.ndarray]:
         """The OCR input image of every rectangle, with the pixels docling's own loop renders."""

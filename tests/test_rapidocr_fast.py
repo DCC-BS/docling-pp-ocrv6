@@ -270,3 +270,43 @@ def test_page_images_are_docling_parses_crops(tmp_path):
     got = model._page_images(SimpleNamespace(_backend=backend), rects)
     for rect, array in zip(rects, got, strict=True):
         assert np.array_equal(array, np.asarray(backend.get_page_image(scale=model.scale, cropbox=rect)))
+
+
+def _random_rects(rng: np.random.Generator, width: float, height: float) -> list[BoundingBox]:
+    rects = []
+    for _ in range(int(rng.choice([0, 1, 2, 3, 5, 12, 30]))):
+        step = rng.choice([1.0, 0.5, 0.25, 0.0])
+        l, t = rng.uniform(-40, width + 20), rng.uniform(-40, height + 20)
+        w, h = abs(rng.uniform(0, rng.choice([5, 40, width + 1]))), abs(rng.uniform(0, rng.choice([5, 40, height + 1])))
+        if step:
+            l, t, w, h = (round(v / step) * step for v in (l, t, w, h))
+        rects.append(BoundingBox(l=l, t=t, r=l + w, b=t + h, coord_origin=CoordOrigin.TOPLEFT))
+    return rects
+
+
+def test_rect_deduplication_equals_doclings_raster():
+    """The rectangle-based deduplication gives docling's boxes, order and coverage, case by case."""
+    from docling.datamodel.base_models import Size
+    from docling.models.base_ocr_model import BaseOcrModel
+
+    model = _bare_model()
+    rng = np.random.default_rng(11)
+    for _ in range(3000):
+        width, height = (float(rng.choice([rng.uniform(1, 60), rng.uniform(50, 300), rng.uniform(300, 900)])) for _ in "wh")
+        size = Size(width=width, height=height)
+        rects = _random_rects(rng, width, height)
+        dilation = int(rng.choice([0, 1, 2, 3, 7, 20]))
+        want_cov, want = BaseOcrModel._deduplicate_rects(model, size, rects, dilation_size=dilation)
+        got_cov, got = model._deduplicate_rects(size, iter(rects), dilation_size=dilation)
+        assert [b.as_tuple() for b in got] == [b.as_tuple() for b in want]
+        assert got_cov == want_cov
+        assert type(got_cov) is type(want_cov)
+
+
+def test_rect_deduplication_falls_back_to_docling():
+    from docling.datamodel.base_models import Size
+
+    model = _bare_model()
+    flipped = BoundingBox(l=30, t=10, r=20, b=40, coord_origin=CoordOrigin.TOPLEFT)
+    with pytest.raises(ValueError, match="x1"):
+        model._deduplicate_rects(Size(width=100, height=100), [flipped], dilation_size=20)
