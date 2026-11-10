@@ -19,8 +19,10 @@ Select it with an OCR preset of kind ``rapidocr-fast``; it takes every option of
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, ClassVar, Literal, Self
+import math
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
+import cv2
 import numpy as np
 from docling.datamodel.pipeline_options import RapidOcrOptions
 from docling.datamodel.settings import settings
@@ -28,6 +30,7 @@ from docling.models.stages.ocr.rapid_ocr_model import RapidOcrModel
 from docling.utils.profiling import TimeRecorder
 from docling_core.types.doc import BoundingBox, CoordOrigin
 from docling_core.types.doc.page import BoundingRectangle, TextCell
+from PIL import Image
 
 from docling_pp_ocrv6._ocr_rects import deduplicate_rects
 
@@ -77,6 +80,60 @@ def _is_docling_parse(backend: object) -> bool:
     except ImportError:
         return False
     return isinstance(backend, ThreadedDoclingParsePageBackend)
+
+
+class _Canvas:
+    """Stands in for a PIL image in docling-parse's ``_crop_image``: records the crop box it computes."""
+
+    def __init__(self, height: int, width: int) -> None:
+        self.height, self.width = height, width
+
+    def crop(self, box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        return box
+
+
+def _render_rgba(result: Any, scale: float) -> np.ndarray | None:  # noqa: ANN401
+    """docling-parse's page render at ``scale`` as a (H, W, 4) array, without its PIL copies.
+
+    ``get_image(scale)`` renders into a byte buffer, copies it into a PIL image and, through
+    ``get_page_image``, crops, converts to RGB and copies again for numpy. The render is the same
+    call; the copies are left out. None when docling-parse would not render here (the scale of its
+    default image, a missing private API): the caller then takes the PIL path.
+    """
+    try:
+        config = result._rendering_config()  # noqa: SLF001
+        if math.isclose(scale, config.scale, rel_tol=0.0, abs_tol=result._scale_abs_tolerance()):  # noqa: SLF001
+            return None  # get_image returns its cached default image here
+        decoder = result._require_page_decoder()  # noqa: SLF001
+    except (AttributeError, RuntimeError):
+        return None
+    config.scale = scale
+    config.canvas_width = -1
+    config.canvas_height = -1
+    raw, shape = decoder.render_image(config)
+    height, width, _ = shape
+    if not raw or len(raw) < height * width * 4:
+        return None  # let docling-parse raise its own error
+    return np.frombuffer(raw, dtype=np.uint8, count=height * width * 4).reshape(height, width, 4)
+
+
+def _crop_rgb(result: Any, rgba: np.ndarray, rect: BoundingBox) -> np.ndarray:  # noqa: ANN401
+    """``get_page_image(cropbox=rect)`` of a rendered page: docling-parse's crop box, alpha dropped.
+
+    PIL's RGBA to RGB conversion drops the alpha channel without compositing, as OpenCV's
+    ``COLOR_RGBA2RGB`` does (which is many times faster than PIL or a numpy copy).
+    """
+    box = result._crop_image(_Canvas(*rgba.shape[:2]), rect)  # noqa: SLF001
+    if isinstance(box, _Canvas):
+        crop = rgba
+    else:
+        left, top, right, bottom = box
+        if right < left or bottom < top:  # PIL refuses these crops: raise its error
+            Image.new("RGBA", (rgba.shape[1], rgba.shape[0])).crop(box)
+        crop = rgba[top:bottom, left:right]
+    if crop.size == 0:
+        return np.ascontiguousarray(crop[:, :, :3])
+    return cv2.cvtColor(crop, cv2.COLOR_RGBA2RGB)
 
 
 class FastRapidOcrOptions(RapidOcrOptions):
@@ -138,11 +195,14 @@ class FastRapidOcrModel(RapidOcrModel):
         """The OCR input image of every rectangle, with the pixels docling's own loop renders."""
         backend = page._backend  # noqa: SLF001
         assert backend is not None  # noqa: S101
-        if len(rects) > 1 and _is_docling_parse(backend):
+        if rects and _is_docling_parse(backend):
             result = getattr(backend, "_result", None)
             if getattr(backend, "_rendered", False) and hasattr(result, "_crop_image"):
                 # get_page_image(scale, cropbox) renders the whole page, crops and converts to RGB:
                 # render once and crop every rectangle with the same function.
+                rgba = _render_rgba(result, self.scale)
+                if rgba is not None:
+                    return [_crop_rgb(result, rgba, rect) for rect in rects]
                 full = result.get_image(scale=self.scale)
                 return [
                     np.asarray(result._crop_image(full, rect).convert("RGB"))  # noqa: SLF001

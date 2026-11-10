@@ -11,7 +11,7 @@ from docling.datamodel.pipeline_options import RapidOcrOptions
 from docling_core.types.doc import BoundingBox, CoordOrigin
 from PIL import Image, ImageDraw, ImageFont
 
-from docling_pp_ocrv6.rapidocr_fast import FastRapidOcrModel, FastRapidOcrOptions
+from docling_pp_ocrv6.rapidocr_fast import FastRapidOcrModel, FastRapidOcrOptions, _render_rgba
 
 
 def test_options_are_rapidocr_options_under_their_own_kind():
@@ -254,7 +254,8 @@ def test_page_images_are_docling_parses_crops(tmp_path):
     image = Image.new("RGB", (612, 792), "white")
     draw = ImageDraw.Draw(image)
     for y in range(40, 760, 37):
-        draw.text((50, y), f"Line {y} with some text", fill="black")
+        draw.text((50, y), f"Line {y} with some text", fill=(y % 256, 40, 200 - y % 200))
+    image.paste(Image.effect_noise((120, 90), 60).convert("RGB"), (400, 300))
     image.save(tmp_path / "page.pdf", resolution=72)
     doc = InputDocument(
         path_or_stream=tmp_path / "page.pdf", format=InputFormat.PDF, backend=ThreadedDoclingParseDocumentBackend
@@ -265,22 +266,36 @@ def test_page_images_are_docling_parses_crops(tmp_path):
         BoundingBox(l=10.3, t=20.7, r=300.2, b=400.9, coord_origin=CoordOrigin.TOPLEFT),
         BoundingBox(l=0, t=0, r=size.width, b=size.height, coord_origin=CoordOrigin.TOPLEFT),
         BoundingBox(l=100.5, t=700.25, r=611.9, b=791.99, coord_origin=CoordOrigin.TOPLEFT),
+        BoundingBox(l=10.0, t=20, r=10.1, b=50, coord_origin=CoordOrigin.TOPLEFT),  # an empty crop
+        BoundingBox(l=-20, t=-5, r=50, b=900, coord_origin=CoordOrigin.TOPLEFT),
     ]
     model = _bare_model()
-    got = model._page_images(SimpleNamespace(_backend=backend), rects)
+    page = SimpleNamespace(_backend=backend)
+    assert _render_rgba(backend._result, model.scale) is not None  # the copy-free path runs here
+    got = model._page_images(page, rects)
     for rect, array in zip(rects, got, strict=True):
-        assert np.array_equal(array, np.asarray(backend.get_page_image(scale=model.scale, cropbox=rect)))
+        want = np.asarray(backend.get_page_image(scale=model.scale, cropbox=rect))
+        assert array.shape == want.shape
+        assert np.array_equal(array, want)
+        (single,) = model._page_images(page, [rect])
+        assert np.array_equal(single, want)
+    off_page = BoundingBox(l=700, t=10, r=720, b=30, coord_origin=CoordOrigin.TOPLEFT)
+    with pytest.raises(ValueError, match="right"):
+        backend.get_page_image(scale=model.scale, cropbox=off_page)
+    with pytest.raises(ValueError, match="right"):
+        model._page_images(page, [off_page])
 
 
 def _random_rects(rng: np.random.Generator, width: float, height: float) -> list[BoundingBox]:
     rects = []
     for _ in range(int(rng.choice([0, 1, 2, 3, 5, 12, 30]))):
         step = rng.choice([1.0, 0.5, 0.25, 0.0])
-        l, t = rng.uniform(-40, width + 20), rng.uniform(-40, height + 20)
-        w, h = abs(rng.uniform(0, rng.choice([5, 40, width + 1]))), abs(rng.uniform(0, rng.choice([5, 40, height + 1])))
+        x, y = rng.uniform(-40, width + 20), rng.uniform(-40, height + 20)
+        w = abs(rng.uniform(0, rng.choice([5, 40, width + 1])))
+        h = abs(rng.uniform(0, rng.choice([5, 40, height + 1])))
         if step:
-            l, t, w, h = (round(v / step) * step for v in (l, t, w, h))
-        rects.append(BoundingBox(l=l, t=t, r=l + w, b=t + h, coord_origin=CoordOrigin.TOPLEFT))
+            x, y, w, h = (round(v / step) * step for v in (x, y, w, h))
+        rects.append(BoundingBox(l=x, t=y, r=x + w, b=y + h, coord_origin=CoordOrigin.TOPLEFT))
     return rects
 
 
@@ -292,7 +307,9 @@ def test_rect_deduplication_equals_doclings_raster():
     model = _bare_model()
     rng = np.random.default_rng(11)
     for _ in range(3000):
-        width, height = (float(rng.choice([rng.uniform(1, 60), rng.uniform(50, 300), rng.uniform(300, 900)])) for _ in "wh")
+        width, height = (
+            float(rng.choice([rng.uniform(1, 60), rng.uniform(50, 300), rng.uniform(300, 900)])) for _ in "xy"
+        )
         size = Size(width=width, height=height)
         rects = _random_rects(rng, width, height)
         dilation = int(rng.choice([0, 1, 2, 3, 7, 20]))
