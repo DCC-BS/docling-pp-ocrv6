@@ -85,6 +85,30 @@ The recognition character dictionary is extracted automatically from the
 recognition model's `inference.yml`. Angle classification uses RapidOCR's
 bundled cls model unless `cls_model_path` is set.
 
+## Fast RapidOCR engine (`rapidocr-fast`)
+
+The plugin also registers `rapidocr-fast`: docling's own RapidOCR engine with the same text and a
+faster page loop. It takes every option of docling's `rapidocr` kind and changes only how a page
+batch is run:
+
+- each page is rendered once at the OCR scale and every OCR rectangle is cropped from it
+  (docling renders the whole page once per rectangle);
+- with RapidOCR's PyTorch engine (`backend: torch`), all rectangles of a page batch go through one
+  pass: image normalisation, padding and the CTC argmax on the GPU, and the detection, angle and
+  recognition forwards of all rectangles queued back to back before their results are read. The
+  batches stay RapidOCR's own: on the GPU a convolution's result can depend on the batch size, so
+  other batches would change the text. RapidOCR's own pre- and post-processing does the rest.
+  Other backends, right-to-left languages, word boxes and rapidocr releases other than 3.10 call
+  RapidOCR per image as docling does.
+
+For docling-serve, as an OCR preset:
+
+```bash
+DOCLING_SERVE_CUSTOM_OCR_PRESETS='{"rapidocr": {"kind": "rapidocr-fast", "backend": "torch"}}'
+```
+
+Written against rapidocr 3.10 (checked at runtime) and docling-parse 7.x.
+
 ## Development
 
 ```bash
