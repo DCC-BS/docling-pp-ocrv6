@@ -379,3 +379,27 @@ def test_det_postprocess_falls_back_for_the_slow_score_mode():
     want, got = op(pred, (300, 500)), postprocess(op, pred, (300, 500))
     assert got[1] == want[1]
     np.testing.assert_array_equal(got[0], want[0])
+
+
+def test_pinned_staging_uploads_and_reuses_its_buffers():
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from docling_pp_ocrv6._rapidocr_driver import _PinnedStaging
+
+    dev = torch.device("cuda")
+    staging = _PinnedStaging(chunk=1 << 12)
+    rng = np.random.default_rng(3)
+    for _ in range(3):
+        staging.reset()
+        arrays = [
+            rng.integers(0, 256, (5, 7, 3), dtype=np.uint8),
+            rng.integers(-9, 9, 11, dtype=np.int64),
+            rng.integers(0, 256, (70, 90, 3), dtype=np.uint8),  # larger than a chunk
+            rng.integers(0, 256, (2, 3), dtype=np.uint8),
+        ]
+        uploaded = [staging.upload(a, dev) for a in arrays]
+        for a, t in zip(arrays, uploaded, strict=True):
+            assert t.device.type == "cuda"
+            np.testing.assert_array_equal(t.cpu().numpy(), a)
+    assert len(staging._bufs) <= 3
