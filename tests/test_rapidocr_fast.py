@@ -287,6 +287,26 @@ def test_page_images_are_docling_parses_crops(tmp_path):
         model._page_images(page, [off_page])
 
 
+def test_page_images_fall_back_for_another_docling_parse(tmp_path, monkeypatch):
+    from docling.backend.docling_parse_backend import ThreadedDoclingParseDocumentBackend
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.document import InputDocument
+
+    from docling_pp_ocrv6 import rapidocr_fast
+
+    Image.new("RGB", (300, 200), (200, 30, 90)).save(tmp_path / "page.pdf", resolution=72)
+    doc = InputDocument(
+        path_or_stream=tmp_path / "page.pdf", format=InputFormat.PDF, backend=ThreadedDoclingParseDocumentBackend
+    )
+    backend = next(iter(doc._backend.iter_pages()))
+    monkeypatch.setattr(rapidocr_fast, "_DOCLING_PARSE_RENDER", {"get_image": "another docling-parse"})
+    model = _bare_model()
+    assert _render_rgba(backend._result, model.scale) is None
+    rect = BoundingBox(l=10, t=20, r=150, b=120, coord_origin=CoordOrigin.TOPLEFT)
+    (got,) = model._page_images(SimpleNamespace(_backend=backend), [rect])
+    np.testing.assert_array_equal(got, np.asarray(backend.get_page_image(scale=model.scale, cropbox=rect)))
+
+
 def _random_rects(rng: np.random.Generator, width: float, height: float) -> list[BoundingBox]:
     rects = []
     for _ in range(int(rng.choice([0, 1, 2, 3, 5, 12, 30]))):
@@ -321,8 +341,16 @@ def test_rect_deduplication_equals_doclings_raster():
         assert type(got_cov) is type(want_cov)
 
 
-def test_rect_deduplication_falls_back_to_docling():
+def test_rect_deduplication_falls_back_to_docling(monkeypatch):
     from docling.datamodel.base_models import Size
+
+    from docling_pp_ocrv6 import _ocr_rects
+
+    rect = BoundingBox(l=10, t=10, r=20, b=40, coord_origin=CoordOrigin.TOPLEFT)
+    assert _ocr_rects.deduplicate_rects(Size(width=100, height=100), [rect], 20) is not None  # this docling's code
+    monkeypatch.setattr(_ocr_rects, "_DOCLING_DEDUPLICATE_RECTS", "another docling")
+    assert _ocr_rects.deduplicate_rects(Size(width=100, height=100), [rect], 20) is None
+    monkeypatch.undo()
 
     model = _bare_model()
     flipped = BoundingBox(l=30, t=10, r=20, b=40, coord_origin=CoordOrigin.TOPLEFT)

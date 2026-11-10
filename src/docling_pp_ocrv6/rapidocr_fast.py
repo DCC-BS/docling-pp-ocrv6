@@ -35,7 +35,7 @@ from docling_core.types.doc import BoundingBox, CoordOrigin
 from docling_core.types.doc.page import BoundingRectangle, TextCell
 from PIL import Image
 
-from docling_pp_ocrv6._ocr_rects import deduplicate_rects
+from docling_pp_ocrv6._ocr_rects import deduplicate_rects, source_digest
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -85,6 +85,14 @@ def _is_docling_parse(backend: object) -> bool:
     return isinstance(backend, ThreadedDoclingParsePageBackend)
 
 
+#: sha256 prefixes of the docling-parse 7.23 methods ``_render_rgba`` reproduces
+_DOCLING_PARSE_RENDER = {
+    "_render_image_at_scale": "a3e656693ccf56dd",
+    "get_image": "07544a0db8b0a10e",
+    "_image_from_bytes": "51d51d43e84d11b4",
+}
+
+
 class _Canvas:
     """Stands in for a PIL image in docling-parse's ``_crop_image``: records the crop box it computes."""
 
@@ -101,8 +109,11 @@ def _render_rgba(result: Any, scale: float) -> np.ndarray | None:  # noqa: ANN40
     ``get_image(scale)`` renders into a byte buffer, copies it into a PIL image and, through
     ``get_page_image``, crops, converts to RGB and copies again for numpy. The render is the same
     call; the copies are left out. None when docling-parse would not render here (the scale of its
-    default image, a missing private API): the caller then takes the PIL path.
+    default image) or is not the version whose code this reproduces: the caller then takes the
+    PIL path.
     """
+    if any(source_digest(getattr(type(result), name, None)) != d for name, d in _DOCLING_PARSE_RENDER.items()):
+        return None  # another docling-parse: its render path may differ from the one reproduced here
     try:
         config = result._rendering_config()  # noqa: SLF001
         if math.isclose(scale, config.scale, rel_tol=0.0, abs_tol=result._scale_abs_tolerance()):  # noqa: SLF001

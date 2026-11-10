@@ -16,15 +16,18 @@ The same result follows from the rectangles alone, since every step maps rectang
   leftmost rectangle starting on that row.
 * The covered area is the area of the union of the rectangles.
 
-:func:`deduplicate_rects` returns ``None`` whenever it cannot vouch for that equivalence (no
-OpenCV, an empty page raster, a rectangle with negative extent or non-finite coordinates); the
-caller then runs docling's own implementation.
+:func:`deduplicate_rects` returns ``None`` whenever it cannot vouch for that equivalence (another
+docling version's code, no OpenCV, an empty page raster, a rectangle with negative extent or
+non-finite coordinates); the caller then runs docling's own implementation.
 """
 
 from __future__ import annotations
 
+import functools
+import hashlib
+import inspect
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from docling_core.types.doc import BoundingBox, CoordOrigin
@@ -33,6 +36,19 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from docling.datamodel.base_models import Size
+
+
+#: sha256 prefixes of the docling functions this module reproduces (docling 2.142)
+_DOCLING_DEDUPLICATE_RECTS = "cbc6bebea835f3b0"
+
+
+@functools.cache
+def source_digest(func: Any) -> str | None:  # noqa: ANN401
+    """Short sha256 of a function's source, None when the source is not available."""
+    try:
+        return hashlib.sha256(inspect.getsource(func).encode()).hexdigest()[:16]
+    except (OSError, TypeError):
+        return None
 
 
 def _union_area(boxes: np.ndarray) -> int:
@@ -81,8 +97,9 @@ def deduplicate_rects(
     """
     from docling.models import base_ocr_model  # noqa: PLC0415
 
-    if dilation_size > 0 and not getattr(base_ocr_model, "CV2_INSTALLED", False):
-        return None  # docling dilates with scipy then, whose anchor differs
+    same_docling = source_digest(base_ocr_model.BaseOcrModel._deduplicate_rects) == _DOCLING_DEDUPLICATE_RECTS  # noqa: SLF001
+    if not same_docling or (dilation_size > 0 and not getattr(base_ocr_model, "CV2_INSTALLED", False)):
+        return None  # another docling's code, or docling dilates with scipy, whose anchor differs
     width, height = round(size.width), round(size.height)
     if width <= 0 or height <= 0:
         return None  # an empty raster: docling's code decides what happens
