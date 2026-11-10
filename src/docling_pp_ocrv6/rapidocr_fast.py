@@ -5,12 +5,15 @@ rectangle and lets RapidOCR prepare every image on the CPU. On a GPU worker with
 OCR stage is bound by that CPU work, not by the models. This engine keeps docling's model, options
 and post-processing and changes only how a page batch is run:
 
-* Each page is rendered once at the OCR scale; every rectangle is cropped from that image with
-  docling-parse's own crop function, which gives the pixels ``get_page_image(cropbox=...)`` gives.
+* Each page is rendered once at the OCR scale; every rectangle is cropped from that render with
+  docling-parse's own crop box, which gives the pixels ``get_page_image(cropbox=...)`` gives,
+  without the PIL copies in between.
+* The OCR rectangles are docling's; their deduplication is computed on the rectangles instead of a
+  page-sized raster (:mod:`~docling_pp_ocrv6._ocr_rects`, same boxes in the same order).
 * With RapidOCR's PyTorch engine (``backend: torch``), all rectangles of a page batch go through
   :class:`~docling_pp_ocrv6._rapidocr_driver.FastRapidOcr`: preprocessing on the GPU, the det/cls/rec
-  forwards of all of them queued back to back in RapidOCR's own batches, RapidOCR's own pre- and
-  post-processing. Other backends call RapidOCR as docling does.
+  forwards in RapidOCR's own batches, RapidOCR's own pre- and post-processing (the DB detection
+  post-processing in a leaner, equal form). Other backends call RapidOCR as docling does.
 
 Select it with an OCR preset of kind ``rapidocr-fast``; it takes every option of docling's
 ``rapidocr`` kind, e.g. ``{"kind": "rapidocr-fast", "backend": "torch"}``.
