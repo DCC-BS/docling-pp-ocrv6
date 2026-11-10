@@ -431,3 +431,30 @@ def test_pinned_staging_uploads_and_reuses_its_buffers():
             assert t.device.type == "cuda"
             np.testing.assert_array_equal(t.cpu().numpy(), a)
     assert len(staging._bufs) <= 3
+
+
+def test_cell_merge_equals_doclings():
+    from docling.models.base_ocr_model import BaseOcrModel
+    from docling_core.types.doc.page import BoundingRectangle, TextCell
+
+    rng = np.random.default_rng(2)
+
+    def cells(n: int) -> list[TextCell]:
+        out = []
+        for i in range(n):
+            x, y = rng.uniform(0, 500, 2)
+            box = BoundingBox(
+                l=x, t=y, r=x + rng.uniform(1, 80), b=y + rng.uniform(1, 20), coord_origin=CoordOrigin.TOPLEFT
+            )
+            rect = BoundingRectangle.from_bounding_box(box)
+            out.append(TextCell(index=i, text="t", orig="t", rect=rect, from_ocr=False))
+        return out
+
+    model = _bare_model()
+    for n_first, n_second in [(0, 0), (0, 5), (7, 0), (3, 9), (12, 4), (40, 40)]:
+        first, second = cells(n_first), cells(n_second)
+        want = BaseOcrModel._merge_cells_by_priority(model, first, second)
+        got = model._merge_cells_by_priority(first, second)
+        assert [id(c) for c in got] == [id(c) for c in want]
+        assert got is not first
+        assert got is not second

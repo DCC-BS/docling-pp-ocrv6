@@ -93,6 +93,10 @@ _DOCLING_PARSE_RENDER = {
 }
 
 
+#: sha256 prefix of docling 2.142's ``BaseOcrModel._merge_cells_by_priority``
+_DOCLING_MERGE_CELLS = "18291cb0e5bac08f"
+
+
 class _Canvas:
     """Stands in for a PIL image in docling-parse's ``_crop_image``: records the crop box it computes."""
 
@@ -204,6 +208,21 @@ class FastRapidOcrModel(RapidOcrModel):
             return super()._deduplicate_rects(size, rects, dilation_size=dilation_size)
         coverage, boxes = fast
         return coverage, self._drop_contained_rects(boxes)
+
+    def _merge_cells_by_priority(
+        self, prioritized_cells: list[TextCell], secondary_cells: list[TextCell]
+    ) -> list[TextCell]:
+        """Docling's merge of OCR and PDF cells, without its spatial index when one side is empty.
+
+        Most pages of a programmatic PDF get no OCR cells; docling still indexes and queries every
+        PDF cell against the empty side. With one side empty its result is the other side.
+        """
+        if source_digest(RapidOcrModel._merge_cells_by_priority) == _DOCLING_MERGE_CELLS:  # noqa: SLF001
+            if not secondary_cells:
+                return list(prioritized_cells)
+            if not prioritized_cells:
+                return list(secondary_cells)
+        return super()._merge_cells_by_priority(prioritized_cells, secondary_cells)
 
     def _page_images(self, page: Page, rects: list[BoundingBox]) -> list[np.ndarray]:
         """The OCR input image of every rectangle, with the pixels docling's own loop renders."""
