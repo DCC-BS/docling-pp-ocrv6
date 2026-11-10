@@ -40,6 +40,7 @@ container build time):
 
 ```python
 from docling_pp_ocrv6 import PPOCRv6Model
+
 PPOCRv6Model.download_models()
 ```
 
@@ -54,9 +55,7 @@ from docling_pp_ocrv6 import PPOCRv6Options
 pipeline_options = PdfPipelineOptions(do_ocr=True)
 pipeline_options.ocr_options = PPOCRv6Options()
 
-converter = DocumentConverter(
-    format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
-)
+converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)})
 result = converter.convert("scanned.pdf")
 print(result.document.export_to_markdown())
 ```
