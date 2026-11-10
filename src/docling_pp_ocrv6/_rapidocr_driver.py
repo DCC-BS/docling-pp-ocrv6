@@ -21,6 +21,7 @@ filtering) is RapidOCR's own code, called in the same order. Written against rap
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass, field
 from importlib.metadata import version
 from typing import Any
@@ -59,6 +60,54 @@ def supported(reader: Any) -> bool:  # noqa: ANN401
         )
     except Exception:  # noqa: BLE001
         return False
+
+
+class _PinnedStaging:
+    """Pinned host buffers for the uploads of one driver call, kept and reused by the next call.
+
+    ``Tensor.pin_memory()`` allocates page-locked memory for every upload (0.5 to 5 ms of CPU time
+    each); copying into a buffer allocated once costs microseconds. A call's uploads take
+    consecutive slices; the next call reuses them after the last upload of the previous one has
+    finished (an event per stream that uploaded).
+    """
+
+    _ALIGN = 256
+
+    def __init__(self, chunk: int = 16 << 20) -> None:
+        self._chunk = chunk
+        self._bufs: list[torch.Tensor] = []
+        self._cur = 0
+        self._off = 0
+        self._done: dict[torch.cuda.Stream, torch.cuda.Event] = {}
+
+    def reset(self) -> None:
+        """Wait until the previous call's uploads have left the buffers, then reuse them."""
+        for event in self._done.values():
+            event.synchronize()
+        self._done.clear()
+        self._cur = self._off = 0
+
+    def upload(self, a: np.ndarray, dev: torch.device) -> torch.Tensor:
+        """Copy ``a`` into pinned memory and start its asynchronous copy to ``dev``."""
+        n = a.nbytes
+        while True:
+            if self._cur == len(self._bufs):
+                self._bufs.append(torch.empty(max(self._chunk, n), dtype=torch.uint8, pin_memory=True))
+            buf = self._bufs[self._cur]
+            start = -(-self._off // self._ALIGN) * self._ALIGN
+            if start + n <= buf.numel():
+                break
+            self._cur, self._off = self._cur + 1, 0
+        self._off = start + n
+        host = buf[start : start + n]
+        np.copyto(host.numpy().view(a.dtype).reshape(a.shape), a)
+        dtype = torch.from_numpy(a[:0]).dtype
+        out = host.view(dtype).view(a.shape).to(dev, non_blocking=True)
+        stream = torch.cuda.current_stream(dev)
+        event = self._done.get(stream) or torch.cuda.Event()
+        event.record(stream)
+        self._done[stream] = event
+        return out
 
 
 @dataclass
@@ -101,6 +150,7 @@ class FastRapidOcr:
         a -= 0.5
         a /= 0.5
         self.rc_lut = torch.from_numpy(a.astype(np.float32)).to(self.dev)
+        self._local = threading.local()  # one set of staging buffers per calling thread
 
     # ---------------------------------------------------------------- helpers
     def _h2d(self, a: np.ndarray) -> torch.Tensor:
@@ -109,9 +159,19 @@ class FastRapidOcr:
         A copy from pageable memory blocks the host until the stream reaches it; staging the
         array in pinned memory lets the CPU go on preparing the next batch.
         """
-        if self.dev.type != "cuda":
+        staging = self._staging()
+        if staging is None:
             return torch.from_numpy(a).to(self.dev)
-        return torch.from_numpy(a).pin_memory().to(self.dev, non_blocking=True)
+        return staging.upload(a, self.dev)
+
+    def _staging(self) -> _PinnedStaging | None:
+        """This thread's pinned upload buffers (None off CUDA)."""
+        if self.dev.type != "cuda":
+            return None
+        staging = getattr(self._local, "staging", None)
+        if staging is None:
+            staging = self._local.staging = _PinnedStaging()
+        return staging
 
     def _det_input(self, resized: np.ndarray) -> torch.Tensor:
         """uint8 (H, W, 3) -> normalised (1, 3, H, W), as ``DetPreProcess.normalize`` and ``permute``."""
@@ -138,6 +198,9 @@ class FastRapidOcr:
     # ---------------------------------------------------------------- entry point
     def __call__(self, images: list[np.ndarray]) -> list[RapidOCROutput]:
         """RapidOCR's result for every image; the GPU work of all images is queued back to back."""
+        staging = self._staging()
+        if staging is not None:
+            staging.reset()
         items = [self._prepare(im) for im in images]
         with torch.no_grad():
             self._detect(items)
