@@ -270,3 +270,133 @@ def test_page_images_are_docling_parses_crops(tmp_path):
     got = model._page_images(SimpleNamespace(_backend=backend), rects)
     for rect, array in zip(rects, got, strict=True):
         assert np.array_equal(array, np.asarray(backend.get_page_image(scale=model.scale, cropbox=rect)))
+
+
+class _FakeStream:
+    def __init__(self) -> None:
+        self.syncs = 0
+
+    def synchronize(self) -> None:
+        self.syncs += 1
+
+    def wait_stream(self, _other: object) -> None:
+        pass
+
+
+class _FakeGraph:
+    """Stands in for ``torch.cuda.CUDAGraph`` on the CPU: replay re-runs what the capture recorded."""
+
+    capturing: _FakeGraph | None = None
+    fail = False
+
+    def __init__(self) -> None:
+        self.recorded = None
+
+    def capture_begin(self, pool: object = None, capture_error_mode: str = "global") -> None:
+        assert capture_error_mode == "thread_local"  # docling's other models use the GPU meanwhile
+        _FakeGraph.capturing = self
+
+    def capture_end(self) -> None:
+        _FakeGraph.capturing = None
+
+    def replay(self) -> None:
+        body, outputs = self.recorded
+        for out, new in zip(outputs, body(), strict=True):
+            out.copy_(new)
+
+
+@pytest.fixture
+def fake_cuda(monkeypatch):
+    """The CUDA calls of ``_Graphs``, faked so its caching policy runs on the CPU."""
+    import contextlib
+
+    torch = pytest.importorskip("torch")
+    stream = _FakeStream()
+    monkeypatch.setattr(torch.cuda, "CUDAGraph", _FakeGraph)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *_a: stream)
+    monkeypatch.setattr(torch.cuda, "stream", lambda _s: contextlib.nullcontext())
+    log: list[tuple[str, tuple[int, ...]]] = []
+
+    def fn(t, w):
+        def body():
+            return ((t.float().sum(dim=(1, 2, 3)) + w).clone(),)
+
+        outputs = body()
+        graph = _FakeGraph.capturing
+        if graph is not None:
+            if _FakeGraph.fail:
+                msg = "operation not permitted when stream is capturing"
+                raise RuntimeError(msg)
+            graph.recorded = (body, outputs)
+        log.append(("capture" if graph is not None else "eager", tuple(t.shape)))
+        return outputs
+
+    return SimpleNamespace(torch=torch, stream=stream, fn=fn, log=log)
+
+
+def _batch(torch, n: int, width: int, value: int):
+    return torch.full((n, 2, width, 3), value, dtype=torch.uint8), torch.arange(n, dtype=torch.int64)
+
+
+def test_graphs_capture_a_shape_on_its_second_call_and_replay_it(fake_cuda):
+    from docling_pp_ocrv6._rapidocr_driver import _Graphs
+
+    torch, log = fake_cuda.torch, fake_cuda.log
+    graphs = _Graphs(fake_cuda.fn, 4, stream=_FakeStream(), pool=None, max_input=10_000)
+    cpu = torch.device("cpu")
+
+    def want(n, width, value):
+        return torch.full((n,), float(2 * width * 3 * value)) + torch.arange(n)
+
+    (out,) = graphs(_batch(torch, 3, 8, 1), cpu)
+    assert torch.equal(out, want(3, 8, 1))
+    assert [kind for kind, _ in log] == ["eager"]  # seen once: no capture
+    (out,) = graphs(_batch(torch, 3, 8, 2), cpu)
+    assert torch.equal(out, want(3, 8, 2))
+    # the warm-up on the capture stream runs one line, then the capture
+    assert [kind for kind, _ in log] == ["eager", "eager", "capture"]
+    assert log[1][1] == (1, 2, 8, 3)
+    (out,) = graphs(_batch(torch, 3, 8, 5), cpu)
+    assert torch.equal(out, want(3, 8, 5))  # replayed on the new input
+    assert len(log) == 3
+    assert list(graphs.graphs) == [(((3, 2, 8, 3), torch.uint8), ((3,), torch.int64))]
+
+    big = _batch(torch, 6, 300, 1)  # over max_input: always eager
+    for _ in range(3):
+        graphs(big, cpu)
+    assert [kind for kind, _ in log[3:]] == ["eager"] * 3
+    assert len(graphs.graphs) == 1
+
+
+def test_graphs_drop_the_least_recently_used(fake_cuda):
+    from docling_pp_ocrv6._rapidocr_driver import _Graphs
+
+    torch = fake_cuda.torch
+    graphs = _Graphs(fake_cuda.fn, 2, stream=_FakeStream(), pool=None, max_input=10_000)
+    cpu = torch.device("cpu")
+    for width in (8, 16, 8, 24):
+        for _ in range(2):
+            graphs(_batch(torch, 2, width, 1), cpu)
+    assert [key[0][0][2] for key in graphs.graphs] == [8, 24]  # 16 was the least recently used
+    assert fake_cuda.stream.syncs == 1  # no replay of a dropped graph in flight
+
+
+def test_graphs_fall_back_to_eager_when_a_capture_fails(fake_cuda, caplog):
+    from docling_pp_ocrv6._rapidocr_driver import _Graphs
+
+    torch = fake_cuda.torch
+    graphs = _Graphs(fake_cuda.fn, 4, stream=_FakeStream(), pool=None, max_input=10_000)
+    cpu = torch.device("cpu")
+    graphs(_batch(torch, 2, 8, 1), cpu)
+    _FakeGraph.fail = True
+    try:
+        (out,) = graphs(_batch(torch, 2, 8, 1), cpu)
+    finally:
+        _FakeGraph.fail = False
+    assert torch.equal(out, torch.tensor([48.0, 49.0]))
+    assert "capture failed" in caplog.text
+    assert not graphs.enabled
+    for _ in range(3):
+        graphs(_batch(torch, 2, 8, 1), cpu)
+    assert not graphs.graphs
+    assert fake_cuda.log[-1][0] == "eager"
