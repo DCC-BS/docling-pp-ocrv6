@@ -75,7 +75,8 @@ def inline(net: Any) -> Any:  # noqa: ANN401
     try:
         gm = fx.GraphModule(net, _Inliner().trace(net))
         _inline_batch_norm(gm)
-    except Exception:  # noqa: BLE001
+    except (ValueError, TypeError, RuntimeError, AttributeError, KeyError, NotImplementedError, AssertionError):
+        # fx's TraceError is a ValueError; anything a network does that a trace cannot represent
         logger.info("rapidocr-fast: %s runs eagerly (no fx graph)", type(net).__name__, exc_info=True)
         return net
     return gm.eval()
