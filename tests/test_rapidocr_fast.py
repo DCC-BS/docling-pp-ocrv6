@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import cv2
 import numpy as np
 import pytest
 from docling.datamodel.pipeline_options import RapidOcrOptions
@@ -327,3 +328,54 @@ def test_rect_deduplication_falls_back_to_docling():
     flipped = BoundingBox(l=30, t=10, r=20, b=40, coord_origin=CoordOrigin.TOPLEFT)
     with pytest.raises(ValueError, match="x1"):
         model._deduplicate_rects(Size(width=100, height=100), [flipped], dilation_size=20)
+
+
+def _det_map(rng: np.random.Generator, h: int, w: int) -> np.ndarray:
+    """A detector-like probability map: noisy text-line blobs, some rotated, some touching."""
+    pred = rng.random((h, w), dtype=np.float32) * 0.15
+    for _ in range(int(rng.integers(0, 25))):
+        cx, cy = rng.uniform(-10, w + 10), rng.uniform(-10, h + 10)
+        size = (float(rng.uniform(2, w / 2)), float(rng.uniform(1, 30)))
+        rect = ((cx, cy), size, float(rng.choice([0.0, rng.uniform(-30, 30), 90.0])))
+        pts = cv2.boxPoints(rect).astype(np.int32)
+        cv2.fillPoly(pred, [pts], float(rng.uniform(0.4, 1.0)))
+    return np.clip(pred + rng.normal(0, 0.03, pred.shape).astype(np.float32), 0, 1)[None, None]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [{}, {"use_dilation": False}, {"thresh": 0.2, "box_thresh": 0.3, "unclip_ratio": 2.0}],
+)
+def test_det_postprocess_equals_rapidocrs(config):
+    """The leaner DB post-processing returns RapidOCR's boxes and scores, bit for bit."""
+    from rapidocr.ch_ppocr_det.utils import DBPostProcess
+
+    from docling_pp_ocrv6._det_post import postprocess
+
+    op = DBPostProcess(**({"box_thresh": 0.5, "unclip_ratio": 1.6, "use_dilation": True} | config))
+    rng = np.random.default_rng(5)
+    found = 0
+    for _ in range(80):
+        h, w = (int(v) for v in rng.integers(1, 20, 2) * 32)
+        pred = _det_map(rng, h, w)
+        shape = (int(rng.integers(10, 2500)), int(rng.integers(10, 2500)))
+        want_boxes, want_scores = op(pred, shape)
+        got_boxes, got_scores = postprocess(op, pred, shape)
+        assert got_scores == want_scores
+        assert got_boxes.dtype == want_boxes.dtype
+        np.testing.assert_array_equal(got_boxes, want_boxes)
+        found += len(want_scores)
+    assert found > 250
+
+
+def test_det_postprocess_falls_back_for_the_slow_score_mode():
+    from rapidocr.ch_ppocr_det.utils import DBPostProcess
+
+    from docling_pp_ocrv6._det_post import postprocess, supported
+
+    op = DBPostProcess(score_mode="slow")
+    assert not supported(op)
+    pred = _det_map(np.random.default_rng(1), 96, 160)
+    want, got = op(pred, (300, 500)), postprocess(op, pred, (300, 500))
+    assert got[1] == want[1]
+    np.testing.assert_array_equal(got[0], want[0])

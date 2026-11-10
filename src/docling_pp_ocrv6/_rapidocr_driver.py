@@ -32,6 +32,8 @@ import torch
 from rapidocr.utils.output import RapidOCROutput
 from rapidocr.utils.process_img import apply_vertical_padding, map_boxes_to_original
 
+from docling_pp_ocrv6._det_post import postprocess as det_postprocess
+
 #: det forwards queued before their results are read back
 _DET_QUEUE = 8
 _RGB = 3
@@ -235,7 +237,7 @@ class FastRapidOcr:
         for it, pred in zip(items, preds, strict=True):
             if pred is None:
                 continue
-            boxes, _ = self.det.postprocess_op(pred, it.img.shape[:2])
+            boxes, _ = det_postprocess(self.det.postprocess_op, pred, it.img.shape[:2])
             if len(boxes) < 1:
                 continue
             it.boxes = self.det.sorted_boxes(boxes)
