@@ -458,3 +458,48 @@ def test_cell_merge_equals_doclings():
         assert [id(c) for c in got] == [id(c) for c in want]
         assert got is not first
         assert got is not second
+
+
+def test_fx_inline_gives_the_eager_results():
+    torch = pytest.importorskip("torch")
+    from torch import nn
+
+    from docling_pp_ocrv6._fx import inline, same_outputs
+
+    class Block(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv = nn.Conv2d(3, 8, 3, padding=1)
+            self.bn = nn.BatchNorm2d(8)
+            self.act = nn.Hardswish()
+            self.head = nn.Linear(8, 5)
+
+        def forward(self, x):
+            x = self.act(self.bn(self.conv(x)))
+            assert x.shape[2] >= 3, "too small"  # shape checks are allowed in a trace
+            x = x.mean(dim=2).permute(0, 2, 1)  # (N, W, C): width-dependent shape
+            return {"out": self.head(x), "w": [x.shape[1]]}
+
+    class Branchy(Block):
+        def forward(self, x):
+            if x.sum() > 0:  # a real data-dependent branch: not traceable
+                return x
+            return -x
+
+    torch.manual_seed(0)
+    net = Block()
+    with torch.no_grad():
+        net.bn.running_mean.uniform_(-1, 1)
+        net.bn.running_var.uniform_(0.5, 2)
+    net.eval()
+    fx_net = inline(net)
+    assert fx_net is not net
+    called = [fx_net.get_submodule(n.target) for n in fx_net.graph.nodes if n.op == "call_module"]
+    assert not called  # every module inlined, batch norm included
+    for shape in [(1, 3, 48, 40), (6, 3, 48, 123), (2, 3, 16, 7)]:
+        x = torch.randn(shape)
+        assert same_outputs(net(x), fx_net(x))
+    branchy = Branchy().eval()
+    assert inline(branchy) is branchy
+    training = Block()
+    assert inline(training) is training

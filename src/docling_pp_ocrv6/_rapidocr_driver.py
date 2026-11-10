@@ -33,6 +33,7 @@ from rapidocr.utils.output import RapidOCROutput
 from rapidocr.utils.process_img import apply_vertical_padding, map_boxes_to_original
 
 from docling_pp_ocrv6._det_post import postprocess as det_postprocess
+from docling_pp_ocrv6._fx import inline
 
 #: det forwards queued before their results are read back
 _DET_QUEUE = 8
@@ -135,9 +136,10 @@ class FastRapidOcr:
         self.cls = reader._load_cls_model()  # noqa: SLF001
         self.rec = reader._load_rec_model()  # noqa: SLF001
         self.dev = self.det.session.device
-        self.det_net = self.det.session.predictor
-        self.cls_net = self.cls.session.predictor
-        self.rec_net = self.rec.session.predictor
+        # The networks as flat fx graphs: same kernels, less Python per forward (eager if untraceable)
+        self.det_net = inline(self.det.session.predictor)
+        self.cls_net = inline(self.cls.session.predictor)
+        self.rec_net = inline(self.rec.session.predictor)
 
         # Det normalisation table, built with RapidOCR's own DetPreProcess.normalize so every
         # value matches the CPU path exactly: index = channel * 256 + pixel value.
