@@ -80,7 +80,7 @@ def _is_docling_parse(backend: object) -> bool:
 class FastRapidOcrOptions(RapidOcrOptions):
     """docling's RapidOCR options under the engine kind ``rapidocr-fast``."""
 
-    kind: ClassVar[Literal["rapidocr-fast"]] = "rapidocr-fast"
+    kind: ClassVar[Literal["rapidocr-fast"]] = "rapidocr-fast"  # ty: ignore[invalid-attribute-override]
 
 
 class FastRapidOcrModel(RapidOcrModel):
