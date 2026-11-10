@@ -180,7 +180,7 @@ class _Graphs:
         del self.calls[key]
         try:
             graph, inputs, outputs = self._capture(args, torch.cuda.current_stream(device))
-        except Exception:  # noqa: BLE001 - a failed capture leaves the forward to eager mode, as RapidOCR runs it
+        except Exception:  # noqa: BLE001, RUF100 - a failed capture leaves the forward to eager mode, as RapidOCR runs it
             logger.warning("rapidocr-fast: CUDA graph capture failed, running eagerly", exc_info=True)
             self.enabled = False
             self._drop(len(self.graphs))
