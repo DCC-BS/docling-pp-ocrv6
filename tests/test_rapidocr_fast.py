@@ -299,7 +299,7 @@ def test_page_images_fall_back_for_another_docling_parse(tmp_path, monkeypatch):
         path_or_stream=tmp_path / "page.pdf", format=InputFormat.PDF, backend=ThreadedDoclingParseDocumentBackend
     )
     backend = next(iter(doc._backend.iter_pages()))
-    monkeypatch.setattr(rapidocr_fast, "_DOCLING_PARSE_RENDER", {"get_image": "another docling-parse"})
+    monkeypatch.setattr(rapidocr_fast, "_DOCLING_PARSE_RENDER", {"get_image": ("another docling-parse",)})
     model = _bare_model()
     assert _render_rgba(backend._result, model.scale) is None
     rect = BoundingBox(l=10, t=20, r=150, b=120, coord_origin=CoordOrigin.TOPLEFT)
