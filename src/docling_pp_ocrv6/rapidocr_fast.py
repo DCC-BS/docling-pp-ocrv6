@@ -85,11 +85,12 @@ def _is_docling_parse(backend: object) -> bool:
     return isinstance(backend, ThreadedDoclingParsePageBackend)
 
 
-#: sha256 prefixes of the docling-parse 7.23 methods ``_render_rgba`` reproduces
+#: sha256 prefixes of the docling-parse methods ``_render_rgba`` reproduces, per supported release:
+#: 7.23, and 7.24 (which only adds a cache of the scaled image around the same render call)
 _DOCLING_PARSE_RENDER = {
-    "_render_image_at_scale": "a3e656693ccf56dd",
-    "get_image": "07544a0db8b0a10e",
-    "_image_from_bytes": "51d51d43e84d11b4",
+    "_render_image_at_scale": ("a3e656693ccf56dd", "a0159e5e08d0bb14"),
+    "get_image": ("07544a0db8b0a10e", "f1fea7092bf53a36"),
+    "_image_from_bytes": ("51d51d43e84d11b4",),
 }
 
 
@@ -116,7 +117,7 @@ def _render_rgba(result: Any, scale: float) -> np.ndarray | None:  # noqa: ANN40
     default image) or is not the version whose code this reproduces: the caller then takes the
     PIL path.
     """
-    if any(source_digest(getattr(type(result), name, None)) != d for name, d in _DOCLING_PARSE_RENDER.items()):
+    if any(source_digest(getattr(type(result), name, None)) not in ds for name, ds in _DOCLING_PARSE_RENDER.items()):
         return None  # another docling-parse: its render path may differ from the one reproduced here
     try:
         config = result._rendering_config()  # noqa: SLF001
