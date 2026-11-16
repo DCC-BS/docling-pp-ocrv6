@@ -584,7 +584,7 @@ wheels = [
 
 [[package]]
 name = "docling-pp-ocrv6"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "docling" },
