@@ -86,8 +86,8 @@ def _boxes_from_bitmap(
     distances = shapely.area(polygons) * op.unclip_ratio / shapely.length(polygons)
     kept, kept_scores = [], []
     for box, distance, score in zip(points, distances.tolist(), scores, strict=True):
-        offset = pyclipper.PyclipperOffset()  # ty: ignore[unresolved-attribute]
-        offset.AddPath(box, pyclipper.JT_ROUND, pyclipper.ET_CLOSEDPOLYGON)  # ty: ignore[unresolved-attribute]
+        offset = pyclipper.PyclipperOffset()  # ty: ignore[missing-attribute]
+        offset.AddPath(box, pyclipper.JT_ROUND, pyclipper.ET_CLOSEDPOLYGON)  # ty: ignore[missing-attribute]
         expanded = np.array(offset.Execute(distance)).reshape((-1, 1, 2))
         mini, sside = _mini_box(expanded)
         if sside < op.min_size + 2:

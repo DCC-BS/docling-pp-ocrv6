@@ -158,7 +158,7 @@ def _crop_rgb(result: Any, rgba: np.ndarray, rect: BoundingBox) -> np.ndarray:  
 class FastRapidOcrOptions(RapidOcrOptions):
     """docling's RapidOCR options under the engine kind ``rapidocr-fast``."""
 
-    kind: ClassVar[Literal["rapidocr-fast"]] = "rapidocr-fast"  # ty: ignore[invalid-attribute-override]
+    kind: ClassVar[Literal["rapidocr-fast"]] = "rapidocr-fast"  # ty: ignore[incompatible-attribute-override]
 
 
 class FastRapidOcrModel(RapidOcrModel):
@@ -250,7 +250,7 @@ class FastRapidOcrModel(RapidOcrModel):
         if result is None or boxes is None:
             logger.warning("RapidOCR returned empty result!")
             return []
-        lines = list(zip(boxes.tolist(), result.txts, result.scores, strict=False))  # ty: ignore[unresolved-attribute]
+        lines = list(zip(boxes.tolist(), result.txts, result.scores, strict=False))  # ty: ignore[missing-attribute]
         return [
             TextCell(
                 index=ix,
